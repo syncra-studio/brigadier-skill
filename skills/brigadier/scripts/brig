@@ -205,7 +205,7 @@ wdir() {
   [[ "$1" =~ ^[A-Za-z0-9_-]+$ && -d "$d" ]] || die "unknown worker: $1"
   echo "$d"
 }
-workers() { [[ -d "$RUN/workers" ]] && find "$RUN/workers" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | sort || true; }
+workers() { if [[ -d "$RUN/workers" ]]; then find "$RUN/workers" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | sort; fi; }
 live_workers() { local w; for w in $(workers); do [[ "$(readf "$RUN/workers/$w/.state")" == live ]] && echo "$w"; done; true; }
 agent_of() { readf "$1/agent" claude; }
 log_event() { echo "$(date '+%H:%M') $*" >>"$RUN/events.log"; }

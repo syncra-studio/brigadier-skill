@@ -40,7 +40,7 @@ be_init_run() {
 }
 
 # Our own pane, if this process runs inside the run's tmux server.
-be_self_id() { [[ -n "${TMUX:-}" ]] && echo "${TMUX_PANE:-}" || true; }
+be_self_id() { if [[ -n "${TMUX:-}" ]]; then echo "${TMUX_PANE:-}"; fi; }
 
 be_spawn() {
   local cwd="$1" cmd="$2" title="$3" id
