@@ -2,7 +2,7 @@
 
 **Hand Claude Code a goal before bed. Wake up to commits, verified phases and a report.**
 
-[![CI](https://github.com/OWNER/brigadier-skill/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/brigadier-skill/actions/workflows/ci.yml)
+[![CI](https://github.com/syncra-studio/brigadier-skill/actions/workflows/ci.yml/badge.svg)](https://github.com/syncra-studio/brigadier-skill/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![skills.sh](https://img.shields.io/badge/skills.sh-brigadier-black)](https://skills.sh)
 
@@ -19,13 +19,13 @@ Brigadier is a Claude Code skill that keeps work moving while you sleep. It runs
 With [skills.sh](https://skills.sh):
 
 ```sh
-npx skills add OWNER/brigadier-skill -g -a claude-code
+npx skills add syncra-studio/brigadier-skill -g -a claude-code
 ```
 
 Or as a Claude Code plugin:
 
 ```text
-/plugin marketplace add OWNER/brigadier-skill
+/plugin marketplace add syncra-studio/brigadier-skill
 /plugin install brigadier-skill@brigadier-skill
 ```
 
@@ -146,6 +146,6 @@ Read this before your first night.
 
 ---
 
-Brigadier has a big sibling: the [Brigadier app](APP_URL).
+Brigadier has a big sibling: the [Brigadier app](https://github.com/syncra-studio/brigadier-ai).
 
 [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md) · [Changelog](CHANGELOG.md) · [MIT License](LICENSE)
