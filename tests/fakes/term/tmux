@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# Fake tmux for the test suite: implements the commands brig's tmux backend uses.
+# shellcheck source=tests/fakes/term/faketerm.sh
+source "$(dirname "${BASH_SOURCE[0]}")/faketerm.sh"
+ft_log "tmux $*"
+
+while (( $# )); do
+  case "$1" in -L|-S) shift 2 ;; *) break ;; esac
+done
+sub="${1:-}"; shift || true
+
+opt() { # opt <flag> <args...>: value after -flag
+  local f="$1"; shift
+  while (( $# )); do [[ "$1" == "$f" ]] && { echo "$2"; return; }; shift; done
+}
+last() { local a=""; while (( $# )); do a="$1"; shift; done; echo "$a"; }
+sess_dir() { echo "$FAKE_TERM_DIR/sessions/${1#=}"; }
+
+case "$sub" in
+  -V) echo "tmux 3.8-fake" ;;
+  display-message)
+    if [[ "${1:-}" == -p ]]; then echo "\$1"; fi ;;
+  has-session) [[ -d "$(sess_dir "$(opt -t "$@")")" ]] ;;
+  new-session)
+    name="$(opt -s "$@")"; mkdir -p "$(sess_dir "$name")"
+    id="%$(ft_next)"; ft_spawn "$id" "$(opt -c "$@")" "$(last "$@")" "$name" ;;
+  new-window)
+    t="$(opt -t "$@")"; id="%$(ft_next)"
+    ft_spawn "$id" "$(opt -c "$@")" "$(last "$@")" "${t%:}"
+    echo "$id" ;;
+  set-window-option|rename-window) : ;;
+  send-keys)
+    t="$(opt -t "$@")"
+    if [[ " $* " == *" -l "* ]]; then ft_type "$t" "$(last "$@")"
+    else ft_enter "$t"; fi ;;
+  capture-pane) ft_read "$(opt -t "$@")" 200 ;;
+  kill-pane) ft_close "$(opt -t "$@")" ;;
+  kill-session)
+    name="$(opt -t "$@")"; name="${name#=}"
+    for id in $(ft_group_ids "$name"); do ft_close "$id"; done
+    rm -rf "$(sess_dir "$name")" ;;
+  kill-server)
+    for id in $(ft_ids); do ft_close "$id"; done ;;
+  list-panes)
+    ids="$(ft_ids)"
+    if [[ -z "$ids" ]]; then echo "no server running on /tmp/fake-tmux" >&2; exit 1; fi
+    echo "$ids" ;;
+  *) echo "fake tmux: unsupported command '$sub'" >&2; exit 2 ;;
+esac

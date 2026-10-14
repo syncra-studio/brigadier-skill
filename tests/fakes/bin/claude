@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# Fake Claude Code for the test suite. Runs the hooks from --settings the way the real
+# CLI does, writes the worker's status/report/handoff, and reacts to typed messages.
+# Behaviour per worker comes from $BRIG_HOME/fake-modes/<wid> (default: done).
+set -uo pipefail
+log() { [[ -n "${FAKE_LOG:-}" ]] && printf '%s\n' "$*" >>"$FAKE_LOG"; true; }
+
+if [[ "${1:-}" == --version ]]; then echo "9.9.9 (Claude Code)"; exit 0; fi
+
+settings="" model="" effort="" perm="" print="" prompt=""
+while (( $# )); do
+  case "$1" in
+    -p|--print) print=1; shift ;;
+    --settings) settings="$2"; shift 2 ;;
+    --model) model="$2"; shift 2 ;;
+    --effort) effort="$2"; shift 2 ;;
+    --permission-mode) perm="$2"; shift 2 ;;
+    --name) shift 2 ;;
+    --allowedTools|--disallowedTools)
+      shift; while (( $# )) && [[ "$1" != --* ]]; do shift; done ;;
+    *) prompt="$1"; shift ;;
+  esac
+done
+
+if [[ -n "$print" ]]; then
+  log "claude -p model=$model effort=$effort perm=$perm"
+  cat >/dev/null
+  echo "FAKE CLAUDE REVIEW: no problems found. APPROVE"
+  exit 0
+fi
+log "claude model=$model effort=$effort perm=$perm prompt=$prompt"
+
+hook() { # hook <Event> <json>
+  local cmd; cmd="$(jq -r --arg e "$1" '.hooks[$e][0].hooks[0].command // empty' "$settings")"
+  [[ -n "$cmd" ]] && printf '%s' "$2" | bash -c "$cmd" >/dev/null
+}
+statusline() { # statusline <ctx-percent>
+  local cmd; cmd="$(jq -r '.statusLine.command // empty' "$settings")"
+  [[ -n "$cmd" ]] && printf '{"model":{"display_name":"Fake"},"context_window":{"used_percentage":%s,"context_window_size":200000},"rate_limits":{"five_hour":{"used_percentage":%s,"resets_at":0}}}' "$1" "${FAKE_RATE:-10}" | bash -c "$cmd" >/dev/null
+}
+stop() { hook Stop "$(jq -cn --arg m "$1" '{last_assistant_message: $m}')"; printf '%s\n❯ \n' "$1"; }
+
+# A reborn brigadier: confirm with `brig ack` unless told not to, then idle.
+if [[ "$prompt" == /*" resume "* ]]; then
+  mode="$(cat "$BRIG_HOME/fake-modes/successor" 2>/dev/null || echo ack)"
+  echo "fake brigadier resuming: $prompt"
+  if [[ "$mode" == ack ]]; then sleep 1; bash "$FAKE_BRIG" ack; fi
+  while :; do sleep 1; done
+fi
+
+d="$(sed -n 's|^Read \(.*\)/task\.md and follow it exactly.*|\1|p' <<<"$prompt")"
+[[ -n "$d" && -d "$d" ]] || { echo "fake claude: no worker dir in prompt: $prompt"; exec sleep 3600; }
+wid="$(basename "$d")"
+mode="$(cat "$BRIG_HOME/fake-modes/$wid" 2>/dev/null || echo "done")"
+
+hook SessionStart '{"session_id":"fake","transcript_path":""}'
+hook UserPromptSubmit '{}'
+echo working >"$d/status"
+case "$mode" in
+  "done")
+    statusline "${FAKE_CTX:-12}"
+    printf '# Report\nfake worker %s finished\n' "$wid" >"$d/report.md"
+    echo "done" >"$d/status"
+    stop "finished $wid" ;;
+  ask)
+    statusline 20
+    stop "Question: may I proceed with the outline? Recommendation: yes" ;;
+  ctx)
+    statusline 85
+    stop "progress update" ;;
+  *) stop "unknown fake mode $mode" ;;
+esac
+
+while IFS= read -r line; do
+  hook UserPromptSubmit '{}'
+  log "claude $wid got: $line"
+  case "$line" in
+    *"BRIGADIER: HANDOFF"*)
+      printf '# Handoff\nfake handoff from %s\n' "$wid" >"$d/handoff.md"
+      echo handoff >"$d/status"
+      stop "handoff written" ;;
+    *) stop "ack: $line" ;;
+  esac
+done

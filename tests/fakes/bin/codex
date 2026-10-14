@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Fake Codex CLI for the test suite: logs its arguments, writes -o, plays a worker.
+set -uo pipefail
+log() { [[ -n "${FAKE_LOG:-}" ]] && printf '%s\n' "$*" >>"$FAKE_LOG"; true; }
+
+if [[ "${1:-}" == --version ]]; then echo "codex-cli 0.0.0-fake"; exit 0; fi
+log "codex $*"
+for a in "$@"; do [[ "$a" == --full-auto ]] && { echo "error: unexpected argument '--full-auto' found" >&2; exit 2; }; done
+
+out="" prev="" last="" resume="" review=""
+for a in "$@"; do
+  [[ "$prev" == -o ]] && out="$a"
+  [[ "$a" == resume ]] && resume=1
+  [[ "$a" == review ]] && review=1
+  prev="$a"; last="$a"
+done
+
+if [[ -n "$review" ]]; then echo "FAKE CODEX REVIEW: no problems found" >"$out"; exit 0; fi
+if [[ -z "$resume" ]]; then echo "session id: 0199aaaa-bbbb-4ccc-8ddd-eeeeffff0000"; fi
+
+d="$(sed -n 's|^Read \(.*\)/task\.md and follow it exactly.*|\1|p' <<<"$last")"
+if [[ -n "$d" && -d "$d" ]]; then
+  printf '# Report\nfake codex worker\n' >"$d/report.md"; echo "done" >"$d/status"
+  echo "finished $(basename "$d")" >"$out"
+elif [[ "$last" == *"Review the implementation plan"* ]]; then
+  echo "FAKE CODEX PLAN REVIEW: APPROVE" >"$out"
+else
+  echo "ack: $last" >"$out"
+fi

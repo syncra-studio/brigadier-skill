@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Fake cmux for the test suite: implements the handful of commands brig uses.
+# shellcheck source=tests/fakes/term/faketerm.sh
+source "$(dirname "${BASH_SOURCE[0]}")/faketerm.sh"
+ft_log "cmux $*"
+
+args=()
+while (( $# )); do
+  case "$1" in
+    --id-format) shift 2 ;;
+    *) args+=("$1"); shift ;;
+  esac
+done
+set -- "${args[@]}"
+sub="${1:-}"; shift || true
+
+opt() { # opt <name> <args...>: value after --name
+  local name="$1"; shift
+  while (( $# )); do [[ "$1" == "--$name" ]] && { echo "$2"; return; }; shift; done
+}
+
+case "$sub" in
+  --version|version) echo "cmux 0.0.0-fake" ;;
+  new-surface)
+    n="$(ft_next)"; id="$(printf 'F%07X-0000-4000-8000-%012X' "$n" "$n")"
+    ft_spawn "$id" "$(opt working-directory "$@")" "$(opt command "$@")"
+    echo "OK surface:$id workspace:$(opt workspace "$@")" ;;
+  send)
+    sid="$(opt surface "$@")"; text=""
+    while (( $# )); do [[ "$1" == "--" ]] && { text="$2"; break; }; shift; done
+    ft_type "$sid" "$text" ;;
+  send-key) ft_enter "$(opt surface "$@")" ;;
+  read-screen) ft_read "$(opt surface "$@")" "$(opt lines "$@")" ;;
+  close-surface) ft_close "$(opt surface "$@")" ;;
+  tree)
+    ft_ids | jq -R '{id: .}' | jq -s '{windows: [{workspaces: [{surfaces: .}]}]}' ;;
+  rename-tab|notify|set-status|clear-status) : ;;
+  *) echo "fake cmux: unsupported command '$sub'" >&2; exit 2 ;;
+esac
