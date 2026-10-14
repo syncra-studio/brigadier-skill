@@ -1,0 +1,14 @@
+{
+  "name": "brigadier-skill",
+  "description": "Brigadier: unattended overnight work for Claude Code.",
+  "owner": { "name": "Stephen Golban" },
+  "plugins": [
+    {
+      "name": "brigadier-skill",
+      "source": "./",
+      "description": "Hand Claude Code a goal at night: Brigadier runs a crew of Claude Code (and optionally Codex) workers in cmux or tmux and leaves a morning report.",
+      "category": "productivity",
+      "tags": ["overnight", "orchestration", "agents", "tmux", "cmux"]
+    }
+  ]
+}
