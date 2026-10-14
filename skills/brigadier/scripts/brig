@@ -384,6 +384,7 @@ cmd_spawn() {
   done
   (( live < BRIG_MAX_WORKERS )) || die "already $live live workers (BRIG_MAX_WORKERS=$BRIG_MAX_WORKERS); close one first"
   mkdir -p "$d"
+  if [[ -f "$RUN/finished" ]]; then rm -f "$RUN/finished"; log_event "reopened"; fi
 
   local others slug; others="$(live_workers | tr '\n' ' ')"; slug="${RUN_ID#*-*-}"
   {

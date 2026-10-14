@@ -16,6 +16,12 @@ tm() {
 
 be_available() { command -v tmux >/dev/null 2>&1; }
 
+# tm_bg_session <name> <run-dir> <cwd>: a detached session whose window 0 shows `brig watch`.
+tm_bg_session() {
+  tm new-session -d -s "$1" -c "$3" -n status -x 200 -y 50 "BRIG_RUN=$(q "$2") bash $(q "$BRIG_SCRIPT") watch" \
+    || die "tmux: could not start the background session $1"
+}
+
 be_init_run() {
   local slug="$2"
   command -v tmux >/dev/null 2>&1 || die "tmux is not installed. $(install_hint tmux)"
@@ -29,9 +35,7 @@ be_init_run() {
   local base="brigadier-$slug" name n=1
   name="$base"
   while tm has-session -t "=$name" 2>/dev/null; do n=$((n + 1)); name="$base-$n"; done
-  local watch; watch="BRIG_RUN=$(q "$1") bash $(q "$BRIG_SCRIPT") watch"
-  tm new-session -d -s "$name" -c "$REPO" -n status -x 200 -y 50 "$watch" \
-    || die "tmux: could not start the background session $name"
+  tm_bg_session "$name" "$1" "$REPO"
   printf 'MODE=background\nTMUX_SESSION=%q\nTMUX_SOCKET=%q\n' "$name" "$TMUX_SOCKET"
 }
 
@@ -40,6 +44,10 @@ be_self_id() { [[ -n "${TMUX:-}" ]] && echo "${TMUX_PANE:-}" || true; }
 
 be_spawn() {
   local cwd="$1" cmd="$2" title="$3" id
+  # `brig finish` or a reboot removes the background session; a resumed run starts it again.
+  if [[ "$MODE" == background ]] && ! tm has-session -t "=$TMUX_SESSION" 2>/dev/null; then
+    tm_bg_session "$TMUX_SESSION" "$RUN" "$cwd"
+  fi
   id="$(tm new-window -d -P -F '#{pane_id}' -t "$TMUX_SESSION:" -c "$cwd" -n "$title" "bash $(q "$cmd")")" \
     || die "tmux: could not open a window in session $TMUX_SESSION"
   tm set-window-option -t "$id" automatic-rename off >/dev/null 2>&1 || true
