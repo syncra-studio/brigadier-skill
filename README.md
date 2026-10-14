@@ -92,7 +92,7 @@ flowchart LR
 | tmux | tmux (attached) | windows in your session (`Ctrl-b w` to pick one) |
 | Terminal.app, iTerm, Ghostty, VS Code, an SSH shell… | tmux (background) | windows in a detached session `brigadier-<slug>` (`tmux attach -t brigadier-<slug>`) |
 
-No tmux? `brig doctor` prints the one-line install for your system (`brew install tmux`, `sudo apt install tmux`, …). Windows (wmux), Zellij, WezTerm and kitty backends are welcome as contributions; each is one small file (see [CONTRIBUTING.md](CONTRIBUTING.md)).
+No tmux? `/brigadier doctor` prints the one-line install for your system (`brew install tmux`, `sudo apt install tmux`, …). Windows (wmux), Zellij, WezTerm and kitty backends are welcome as contributions; each is one small file (see [CONTRIBUTING.md](CONTRIBUTING.md)).
 
 ## Configuration
 
@@ -119,8 +119,8 @@ All settings live in one file, `~/.claude/brigadier/config.env`. Copy [`config.e
 Read this before your first night.
 
 - **Workers run unattended with permissions bypassed by default** (`--permission-mode bypassPermissions`, and Codex without its sandbox). That's what lets work continue while you sleep, and it means a worker can run any command your user account can. Run Brigadier on repos and machines where that's acceptable. To be stricter, set `BRIG_PERMISSION_MODE` to `acceptEdits`, `auto`, `dontAsk` or `manual`. Prompts then reach the brigadier, which approves only what its rules allow, and Codex workers run in their workspace-write sandbox.
-- **It never pushes, publishes, deploys, spends money, signs up for anything or contacts anyone on your behalf.** Those requests are stubbed and listed under "Waiting on you" in the report. The worker protocol also bans killing processes by name and deleting other runs' scratch files.
-- **It uses your own subscription quota.** Every worker is a normal Claude Code (or Codex) session on your account, so a night of work uses your plan's limits like a day of work would. The brigadier watches the 5-hour window and pauses before it runs dry. If you also run the Brigadier app at the same time, both share that one subscription's 5-hour window.
+- **Its rules forbid pushing, publishing, deploying, spending money, signing up for anything or contacting anyone on your behalf.** Workers stub those and the report lists them under "Waiting on you". The worker protocol also bans killing processes by name and deleting other runs' scratch files. These are instructions the sessions follow, not a sandbox: with permissions bypassed, nothing technically stops a worker that ignores them.
+- **It uses your own subscription quota.** Every worker is a normal Claude Code (or Codex) session on your account, so a night of work uses your plan's limits like a day of work would. When the 5-hour window passes `BRIG_RATE_PCT` (95%), the brigadier stops starting Claude workers and waits for the reset. If you also run the Brigadier app at the same time, both share that one subscription's 5-hour window.
 - **It drives your own, unmodified `claude` and `codex` binaries in your own terminal.** No tokens are shared or proxied, there's no API intermediary, and nothing is sent anywhere except by those official CLIs. Run state stays in `~/.claude/brigadier/` on your machine.
 - **Keep the machine awake.** A sleeping laptop stops the run. On macOS, `caffeinate -dimsu` in a spare tab works.
 
