@@ -16,15 +16,20 @@ be_self_id() { echo "${CMUX_SURFACE_ID:-}"; }
 
 be_spawn() {
   local cwd="$1" cmd="$2" title="$3" out sid
-  out="$(cmux --id-format uuids new-surface --workspace "$WORKSPACE" --working-directory "$cwd" --command "$cmd" --focus false)"
+  out="$(cmux --id-format uuids new-surface --workspace "$WORKSPACE" --working-directory "$cwd" --command "bash $(q "$cmd")" --focus false)"
   sid="$(grep -Eo '[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}' <<<"$out" | head -1)"
   [[ -n "$sid" ]] || die "cmux: could not parse a surface id from: $out"
   cmux rename-tab --surface "$sid" "$title" >/dev/null 2>&1 || true
   echo "$sid"
 }
 
-be_send_text() { cmux send --surface "$1" -- "$2" >/dev/null; }
-be_send_enter() { cmux send-key --surface "$1" enter >/dev/null; }
+# --force: the brigadier is the only typist in a worker tab, and NEEDS_INPUT answers go into open dialogs.
+# Keystroke mode turns \n, \r and \t into keys, so text with a backslash is pasted instead.
+be_send_text() {
+  if [[ "$2" == *\\* ]]; then cmux send --paste --force --surface "$1" -- "$2" >/dev/null
+  else cmux send --force --surface "$1" -- "$2" >/dev/null; fi
+}
+be_send_enter() { cmux send-key --force --surface "$1" enter >/dev/null; }
 be_read() { cmux read-screen --surface "$1" --lines "${2:-40}"; }
 be_close() { cmux close-surface --force --surface "$1" >/dev/null; }
 be_live_ids() {
