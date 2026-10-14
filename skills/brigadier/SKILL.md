@@ -3,7 +3,7 @@ name: brigadier
 description: Run unattended overnight work in Claude Code. Brigadier turns one goal into a crew of Claude Code (and optionally Codex) worker sessions in cmux or tmux, answers their questions from your plan and rules, rotates each worker into a fresh session before its context fills, verifies every phase with a review, and leaves a morning report. Use when the user runs /brigadier with a goal, "/brigadier resume", or "/brigadier doctor".
 license: MIT
 compatibility: Claude Code on macOS or Linux with jq, git and cmux or tmux (tmux is started in the background from a plain terminal). Codex CLI optional.
-argument-hint: <goal> | resume [run-id] | doctor
+argument-hint: <goal> | resume [run-id] | doctor | config
 disable-model-invocation: true
 metadata:
   version: "0.1.0"
@@ -28,7 +28,8 @@ Run state lives outside the repo, in `~/.claude/brigadier/runs/<run-id>/`: `goal
 Run `brig doctor`.
 - If it prints "Brigadier skill doesn't run inside the Brigadier app…", reply with exactly that line and stop.
 - If it prints `FAIL` lines, show the user those lines with their fixes and stop.
-- If `$ARGUMENTS` is empty or `doctor`, show the doctor output, then this usage and stop: `/brigadier <goal>` starts a run, `/brigadier resume [run-id]` continues one, and settings live in `~/.claude/brigadier/config.env` (template: `${CLAUDE_SKILL_DIR}/config.example.env`).
+- If `$ARGUMENTS` is empty or `doctor`, show the doctor output, then this usage and stop: `/brigadier <goal>` starts a run, `/brigadier resume [run-id]` continues one, `/brigadier config` shows the settings, and settings live in `~/.claude/brigadier/config.env` (template: `${CLAUDE_SKILL_DIR}/config.example.env`).
+- If `$ARGUMENTS` is `config`, run `brig config`, show its output and stop.
 
 Otherwise `$ARGUMENTS` is one of:
 - a **goal prompt**, usually a phase brief. It may contain run directives in plain words, such as "stop after Phase 3", "until 07:30", "max 2 workers", "handoff at 60%". Pull them out and write them in the ledger. Put numeric ones in `<run>/config.env` (for example `BRIG_CTX_PCT=60`, `BRIG_MAX_WORKERS=2`). A directive can't raise a limit above what the user's config allows (`BRIG_ALLOWED_MODELS`, `BRIG_MAX_EFFORT`).

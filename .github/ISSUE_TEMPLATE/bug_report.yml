@@ -1,0 +1,41 @@
+name: Bug report
+description: Something in Brigadier didn't work as described
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Output of /brigadier doctor
+      description: Paste it as is. Check it for anything private first.
+      render: text
+    validations:
+      required: true
+  - type: dropdown
+    id: terminal
+    attributes:
+      label: Terminal backend
+      options:
+        - cmux
+        - tmux (attached)
+        - tmux (background, from a plain terminal)
+        - other
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS and version
+      placeholder: macOS 26.0 / Ubuntu 24.04 / WSL2 Ubuntu
+  - type: textarea
+    id: events
+    attributes:
+      label: Relevant lines from events.log
+      description: From ~/.claude/brigadier/runs/<run-id>/events.log. Remove anything private.
+      render: text
