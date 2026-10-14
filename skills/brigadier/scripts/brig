@@ -17,6 +17,7 @@ die() { echo "brig: $*" >&2; exit 1; }
 now() { date +%s; }
 readf() { if [[ -f "$1" ]]; then tr -d '\n' <"$1"; else echo "${2:-}"; fi; }
 q() { printf '%q' "$1"; }
+abspath() { if [[ "$1" == /* ]]; then echo "$1"; else echo "$PWD/$1"; fi; }
 if stat -c %Y / >/dev/null 2>&1; then
   mtime() { if [[ -e "$1" ]]; then stat -c %Y "$1"; else echo 0; fi; }
 else
@@ -688,13 +689,13 @@ cmd_finish() {
 cmd_review() {
   local kind="${1:?usage: brig review code|plan ...}"; shift
   local target=() plan="" out="" effort="" focus="" repo=""
-  if [[ "$kind" == plan ]]; then plan="${1:?plan file}"; shift; [[ -f "$plan" ]] || die "no such file: $plan"; fi
+  if [[ "$kind" == plan ]]; then plan="${1:?plan file}"; shift; [[ -f "$plan" ]] || die "no such file: $plan"; plan="$(abspath "$plan")"; fi
   while (( $# )); do
     case "$1" in
       --base|--commit) target=("$1" "$2"); shift 2 ;;
       --uncommitted) target=(--uncommitted); shift ;;
       --repo) repo="$2"; shift 2 ;;
-      --out) out="$2"; shift 2 ;;
+      --out) out="$(abspath "$2")"; shift 2 ;;
       --effort) effort="$2"; shift 2 ;;
       --focus) focus="$2"; shift 2 ;;
       *) die "review: unknown flag $1" ;;
