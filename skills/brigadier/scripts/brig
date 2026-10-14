@@ -1,0 +1,848 @@
+#!/usr/bin/env bash
+# brig: control plane for the Brigadier skill.
+# Spawns Claude Code (and, if installed, Codex) workers in terminal tabs or windows (cmux or tmux),
+# instruments them (statusline + hooks, or the codex-worker loop, write state files),
+# runs plan and code reviews, and lets the brigadier block cheaply until something
+# needs its attention. Every bundled script is started with `bash <path>`, so the
+# skill works even when an installer drops the executable bits.
+set -euo pipefail
+
+BRIG_VERSION="0.1.0"
+SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+BRIG_SCRIPT="$SKILL_DIR/scripts/brig"
+CFG_ROOT="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+BRIG_HOME="${BRIG_HOME:-$CFG_ROOT/brigadier}"
+
+die() { echo "brig: $*" >&2; exit 1; }
+now() { date +%s; }
+readf() { if [[ -f "$1" ]]; then tr -d '\n' <"$1"; else echo "${2:-}"; fi; }
+q() { printf '%q' "$1"; }
+if stat -c %Y / >/dev/null 2>&1; then
+  mtime() { if [[ -e "$1" ]]; then stat -c %Y "$1"; else echo 0; fi; }
+else
+  mtime() { if [[ -e "$1" ]]; then stat -f %m "$1"; else echo 0; fi; }
+fi
+hhmm() {
+  (( $1 > 0 )) || { echo "--:--"; return; }
+  date -d "@$1" +%H:%M 2>/dev/null || date -r "$1" +%H:%M 2>/dev/null || echo "--:--"
+}
+
+# The Brigadier app runs its own overnight mode; this skill stays out of its sessions.
+case "${1:-help}" in
+  help|-h|--help|version|--version) ;;
+  *) if [[ -n "${BRIGADIER_SESSION:-}" ]]; then
+       echo "Brigadier skill doesn't run inside the Brigadier app. Use the app's Overnight mode there." >&2
+       exit 3
+     fi ;;
+esac
+
+# ---- configuration ------------------------------------------------------------
+# Precedence: environment > <run>/config.env > ~/.claude/brigadier/config.env > defaults.
+BRIG_KEYS="BRIG_BACKEND BRIG_DEFAULT_MODEL BRIG_CHORE_MODEL BRIG_ALLOWED_MODELS BRIG_DEFAULT_EFFORT BRIG_MAX_EFFORT
+BRIG_MAX_WORKERS BRIG_CTX_PCT BRIG_CTX_TOKENS BRIG_SELF_TOKENS BRIG_STALL_MIN BRIG_IDLE_SEC BRIG_RATE_PCT BRIG_POLL
+BRIG_CODEX BRIG_REVIEWER BRIG_PERMISSION_MODE BRIG_CLAUDE_CONFIG_DIR BRIG_REBIRTH_TIMEOUT BRIG_TMUX_SOCKET BRIG_TMUX_MODE"
+ENV_SET=" "
+for _k in $BRIG_KEYS; do
+  if [[ -n "${!_k+x}" ]]; then ENV_SET+="$_k "; eval "ENV_$_k=\${$_k}"; fi
+done
+USER_CONFIG="$BRIG_HOME/config.env"
+
+load_config() {
+  local run="${1:-}" k v
+  for k in $BRIG_KEYS; do unset "$k"; done
+  # shellcheck disable=SC1090
+  if [[ -f "$USER_CONFIG" ]]; then source "$USER_CONFIG" || die "cannot read $USER_CONFIG"; fi
+  # shellcheck disable=SC1090,SC1091
+  if [[ -n "$run" && -f "$run/config.env" ]]; then source "$run/config.env" || die "cannot read $run/config.env"; fi
+  for k in $ENV_SET; do v="ENV_$k"; printf -v "$k" '%s' "${!v}"; done
+  : "${BRIG_BACKEND:=auto}" "${BRIG_DEFAULT_MODEL:=opus}" "${BRIG_CHORE_MODEL:=sonnet}" "${BRIG_ALLOWED_MODELS:=*}"
+  : "${BRIG_DEFAULT_EFFORT:=high}" "${BRIG_MAX_EFFORT:=high}" "${BRIG_MAX_WORKERS:=3}"
+  : "${BRIG_CTX_PCT:=70}" "${BRIG_CTX_TOKENS:=300000}" "${BRIG_SELF_TOKENS:=150000}"
+  : "${BRIG_STALL_MIN:=30}" "${BRIG_IDLE_SEC:=120}" "${BRIG_RATE_PCT:=95}" "${BRIG_POLL:=15}"
+  : "${BRIG_CODEX:=auto}" "${BRIG_REVIEWER:=auto}" "${BRIG_PERMISSION_MODE:=bypassPermissions}"
+  : "${BRIG_CLAUDE_CONFIG_DIR:=}" "${BRIG_REBIRTH_TIMEOUT:=900}" "${BRIG_TMUX_SOCKET:=}" "${BRIG_TMUX_MODE:=auto}"
+}
+load_config
+
+effort_rank() { case "$1" in low) echo 1 ;; medium) echo 2 ;; high) echo 3 ;; xhigh) echo 4 ;; max) echo 5 ;; *) echo 0 ;; esac; }
+check_effort() {
+  local r m; r="$(effort_rank "$1")"; m="$(effort_rank "$BRIG_MAX_EFFORT")"
+  (( r > 0 )) || die "unknown effort '$1' (low, medium, high, xhigh, max)"
+  (( r <= m )) || die "effort '$1' is above BRIG_MAX_EFFORT=$BRIG_MAX_EFFORT (raise it in $USER_CONFIG if you mean it)"
+}
+model_allowed() {
+  [[ "$BRIG_ALLOWED_MODELS" == "*" ]] && return 0
+  local m; for m in $BRIG_ALLOWED_MODELS; do [[ "$m" == "$1" ]] && return 0; done
+  return 1
+}
+claude_model() {
+  local m="${1:-$BRIG_DEFAULT_MODEL}"
+  model_allowed "$m" || die "model '$m' is not in BRIG_ALLOWED_MODELS ($BRIG_ALLOWED_MODELS); change the list in $USER_CONFIG"
+  echo "$m"
+}
+allowed_json() {
+  # shellcheck disable=SC2086
+  if [[ "$BRIG_ALLOWED_MODELS" == "*" ]]; then echo null; else printf '%s\n' $BRIG_ALLOWED_MODELS | jq -R . | jq -sc .; fi
+}
+check_permission_mode() {
+  case "$BRIG_PERMISSION_MODE" in
+    bypassPermissions|acceptEdits|auto|dontAsk|manual) ;;
+    *) die "BRIG_PERMISSION_MODE '$BRIG_PERMISSION_MODE' must be bypassPermissions, acceptEdits, auto, dontAsk or manual" ;;
+  esac
+}
+codex_on() {
+  case "$BRIG_CODEX" in
+    off) return 1 ;;
+    on) command -v codex >/dev/null 2>&1 || die "BRIG_CODEX=on but 'codex' is not on PATH" ;;
+    *) command -v codex >/dev/null 2>&1 ;;
+  esac
+}
+reviewer() {
+  case "$BRIG_REVIEWER" in
+    off|claude) echo "$BRIG_REVIEWER" ;;
+    codex) codex_on || die "BRIG_REVIEWER=codex but Codex is unavailable (not on PATH or BRIG_CODEX=off)"; echo codex ;;
+    *) if codex_on; then echo codex; else echo claude; fi ;;
+  esac
+}
+install_hint() {
+  local pkg="$1" os id=""
+  os="$(uname -s)"
+  if [[ "$os" == Darwin ]]; then echo "Install it with: brew install $pkg"; return; fi
+  # shellcheck disable=SC1091
+  [[ -f /etc/os-release ]] && id="$(. /etc/os-release; echo "${ID:-} ${ID_LIKE:-}")"
+  case "$id" in
+    *debian*|*ubuntu*) echo "Install it with: sudo apt install $pkg" ;;
+    *fedora*|*rhel*|*centos*) echo "Install it with: sudo dnf install $pkg" ;;
+    *arch*) echo "Install it with: sudo pacman -S $pkg" ;;
+    *alpine*) echo "Install it with: sudo apk add $pkg" ;;
+    *suse*) echo "Install it with: sudo zypper install $pkg" ;;
+    *) echo "Install '$pkg' with your package manager" ;;
+  esac
+}
+
+# ---- terminal backends ----------------------------------------------------------
+# Optional backend functions default to quiet no-ops.
+be_notify() { :; }
+be_status() { :; }
+be_status_clear() { :; }
+be_watch_hint() { :; }
+be_finish() { :; }
+be_self_id() { :; }
+BACKEND_LOADED=""
+load_backend() {
+  local b="$1"
+  [[ "$BACKEND_LOADED" == "$b" ]] && return 0
+  [[ "$b" =~ ^[a-z0-9_-]+$ && -f "$SKILL_DIR/scripts/backends/$b.sh" ]] || die "unknown terminal backend '$b' (available: $(find "$SKILL_DIR/scripts/backends" -name '*.sh' -exec basename {} .sh \; | sort | tr '\n' ' '))"
+  # shellcheck disable=SC1090
+  source "$SKILL_DIR/scripts/backends/$b.sh"
+  BACKEND_LOADED="$b"
+}
+# Which backend a NEW run uses. An existing run always uses the one recorded in its run.env.
+pick_backend() {
+  case "$BRIG_BACKEND" in
+    auto)
+      if [[ -n "${CMUX_WORKSPACE_ID:-}" ]] && command -v cmux >/dev/null 2>&1; then echo cmux
+      elif command -v tmux >/dev/null 2>&1; then echo tmux
+      else return 1; fi ;;
+    *) echo "$BRIG_BACKEND" ;;
+  esac
+}
+no_terminal_msg() {
+  echo "Brigadier needs cmux or tmux to run workers, and neither is available. $(install_hint tmux) — then run /brigadier again from any terminal; it starts tmux in the background for you."
+}
+
+# ---- runs -----------------------------------------------------------------------
+# Every brigadier is bound to its run through its own identity, never through a shared pointer:
+#   1. BRIG_RUN (run id or path)        - init prints it; the skill passes it on every call
+#   2. BRIG_WORKER_DIR                  - a worker's own run (set by its launch script)
+#   3. a binding for this session       - cmux surface, tmux pane, or Claude session id
+#   4. the only unfinished run          - refused when several runs are unfinished
+identity() {
+  if [[ -n "${CMUX_SURFACE_ID:-}" ]]; then echo "cmux-$CMUX_SURFACE_ID"
+  elif [[ -n "${TMUX:-}" && -n "${TMUX_PANE:-}" ]]; then echo "tmux-$(cut -d, -f2 <<<"$TMUX")-${TMUX_PANE#%}"
+  elif [[ -n "${CLAUDE_CODE_SESSION_ID:-}" ]]; then echo "claude-$CLAUDE_CODE_SESSION_ID"
+  fi
+}
+bind_identity() {
+  local id; id="$(identity)"; [[ -n "$id" && -z "${BRIG_WORKER:-}" ]] || return 0
+  mkdir -p "$BRIG_HOME/bindings" && ln -sfn "$1" "$BRIG_HOME/bindings/$id"
+}
+unfinished_runs() {
+  local e; [[ -d "$BRIG_HOME/runs" ]] || return 0
+  for e in "$BRIG_HOME"/runs/*; do [[ -f "$e/run.env" && ! -f "$e/finished" ]] && basename "$e"; done; true
+}
+run_dir() {
+  local r="${BRIG_RUN:-}" id p
+  if [[ -z "$r" && -n "${BRIG_WORKER_DIR:-}" ]]; then r="$(dirname "$(dirname "$BRIG_WORKER_DIR")")"; fi
+  if [[ -z "$r" ]]; then
+    id="$(identity)"; p="$BRIG_HOME/bindings/$id"
+    if [[ -n "$id" && -L "$p" ]]; then r="$(readlink "$p")"; fi
+  fi
+  if [[ -z "$r" ]]; then
+    local list n; list="$(unfinished_runs)"; n="$(grep -c . <<<"$list" || true)"
+    case "$n" in
+      0) die "no active run; start one with 'brig init <slug>' or pick one with 'brig use <run-id>'" ;;
+      1) r="$list"; bind_identity "$BRIG_HOME/runs/$r" ;;
+      *) die "several runs are active ($(tr '\n' ' ' <<<"$list")); pass BRIG_RUN=<run-id> or run 'brig use <run-id>'" ;;
+    esac
+  fi
+  [[ "$r" == /* ]] || r="$BRIG_HOME/runs/$r"
+  [[ -d "$r" && -f "$r/run.env" ]] || die "run not found: $r"
+  echo "$r"
+}
+# Load a run: its run.env, its config, its backend. Sets RUN.
+open_run() {
+  RUN="$(run_dir)"
+  # shellcheck disable=SC1091
+  source "$RUN/run.env"
+  load_config "$RUN"
+  load_backend "$BACKEND"
+}
+
+wdir() {
+  local d; d="$RUN/workers/$1"
+  [[ "$1" =~ ^[A-Za-z0-9_-]+$ && -d "$d" ]] || die "unknown worker: $1"
+  echo "$d"
+}
+workers() { [[ -d "$RUN/workers" ]] && find "$RUN/workers" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | sort || true; }
+live_workers() { local w; for w in $(workers); do [[ "$(readf "$RUN/workers/$w/.state")" == live ]] && echo "$w"; done; true; }
+agent_of() { readf "$1/agent" claude; }
+log_event() { echo "$(date '+%H:%M') $*" >>"$RUN/events.log"; }
+
+sl() { if [[ -f "$1/statusline.json" ]]; then jq -r "$2" "$1/statusline.json" 2>/dev/null || echo 0; else echo 0; fi; }
+ctx_pct() { sl "$1" '(.context_window.used_percentage // 0) | floor'; }
+ctx_tokens() { sl "$1" '((.context_window.used_percentage // 0) * (.context_window.context_window_size // 0) / 100) | floor'; }
+rate_pct() { sl "$1" '(.rate_limits.five_hour.used_percentage // 0) | floor'; }
+rate_reset() { sl "$1" '.rate_limits.five_hour.resets_at // 0'; }
+ctx_label() { if [[ "$(agent_of "$1")" == codex ]]; then echo "-"; else echo "$(ctx_pct "$1")%"; fi; }
+busy() { (( $(mtime "$1/prompt.ts") > $(mtime "$1/stop.json") )); }
+# What a Claude worker's screen says it is doing: interrupted | working | background | idle | unknown.
+# A turn cut off by Esc or a restart fires no Stop hook, so `busy` stays true; only the screen shows it.
+screen_state() {
+  local txt; txt="$(be_read "$(readf "$1/surface")" 14 2>/dev/null)" || { echo unknown; return; }
+  if grep -q "Interrupted ·" <<<"$txt"; then echo interrupted
+  elif grep -q "…" <<<"$txt"; then echo working
+  elif grep -Eq "shells? still running|· [0-9]+ shells? ·" <<<"$txt"; then echo background
+  else echo idle; fi
+}
+transcript_mtime() {
+  local tp="" tm
+  [[ -f "$1/session.json" ]] && tp="$(jq -r '.transcript_path // ""' "$1/session.json" 2>/dev/null || true)"
+  tm="$(mtime "${tp:-/nonexistent}")"; (( tm == 0 )) && tm="$(mtime "$1/prompt.ts")"; echo "$tm"
+}
+# The calling Claude session's own context in tokens (last assistant turn's input), 0 if unknown.
+self_tokens() {
+  local id="${CLAUDE_CODE_SESSION_ID:-}" f
+  [[ -n "$id" ]] || { echo 0; return; }
+  f="$(find "$CFG_ROOT/projects" -maxdepth 2 -name "$id.jsonl" 2>/dev/null | head -1)"
+  [[ -n "$f" ]] || { echo 0; return; }
+  tail -200 "$f" | jq -r 'select(.type=="assistant") | .message.usage // empty
+    | (.input_tokens // 0) + (.cache_creation_input_tokens // 0) + (.cache_read_input_tokens // 0)' 2>/dev/null | tail -1 | grep . || echo 0
+}
+# Environment a fresh Claude/Codex session must not inherit from the brigadier's own session.
+clean_env_lines() {
+  echo 'unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_SESSION_ID CLAUDE_CODE_SSE_PORT BRIG_WORKER BRIG_WORKER_DIR'
+  if [[ -n "$BRIG_CLAUDE_CONFIG_DIR" ]]; then echo "export CLAUDE_CONFIG_DIR=$(q "$BRIG_CLAUDE_CONFIG_DIR")"; fi
+}
+claude_settings_json() {
+  local hook="$1" d="$2" skip=false
+  [[ "$BRIG_PERMISSION_MODE" == bypassPermissions ]] && skip=true
+  jq -n --arg h "$hook" --arg d "$(q "$d")" --argjson allowed "$(allowed_json)" --arg eff "$BRIG_DEFAULT_EFFORT" --argjson skip "$skip" '{
+    effortLevel: $eff,
+    skipDangerousModePermissionPrompt: $skip,
+    statusLine: {type: "command", command: "\($h) statusline \($d)"},
+    hooks: {
+      SessionStart:     [{hooks: [{type: "command", command: "\($h) session \($d)"}]}],
+      UserPromptSubmit: [{hooks: [{type: "command", command: "\($h) prompt \($d)"}]}],
+      Stop:             [{hooks: [{type: "command", command: "\($h) stop \($d)"}]}],
+      Notification:     [{hooks: [{type: "command", command: "\($h) notify \($d)"}]}],
+      PreCompact:       [{hooks: [{type: "command", command: "\($h) precompact \($d)"}]}]
+    }} + (if $allowed == null then {} else {availableModels: $allowed} end)'
+}
+
+# ---- hooks (invoked by a Claude worker via --settings) -----------------------------
+cmd__hook() {
+  local kind="$1" d="$2"
+  [[ -d "$d" ]] || exit 0
+  case "$kind" in
+    statusline)
+      local j; j="$(cat)"; printf '%s' "$j" >"$d/statusline.json.tmp" && mv -f "$d/statusline.json.tmp" "$d/statusline.json"
+      printf '%s' "$j" | jq -r --arg w "$(basename "$d")" '"\($w) · \(.model.display_name // "?") · ctx \((.context_window.used_percentage // 0) | floor)% · 5h \((.rate_limits.five_hour.used_percentage // 0) | floor)%"' ;;
+    session) cat >"$d/session.json" ;;
+    prompt) cat >/dev/null; now >"$d/prompt.ts" ;;
+    stop) cat >"$d/stop.json.tmp" && mv -f "$d/stop.json.tmp" "$d/stop.json" ;;
+    notify) jq -c . >>"$d/notify.jsonl" ;;
+    precompact) cat >"$d/precompact.json" ;;
+    *) die "unknown hook $kind" ;;
+  esac
+}
+
+# ---- run lifecycle ------------------------------------------------------------------
+# brig init <slug> [--slash "/brigadier"]
+cmd_init() {
+  local slug="" slash="/brigadier"
+  while (( $# )); do
+    case "$1" in
+      --slash) slash="$2"; shift 2 ;;
+      -*) die "init: unknown flag $1" ;;
+      *) slug="$1"; shift ;;
+    esac
+  done
+  [[ "$slug" =~ ^[a-z0-9][a-z0-9-]{0,39}$ ]] || die "usage: brig init <slug> (lowercase letters, digits and dashes)"
+  [[ "$slash" =~ ^/[A-Za-z0-9:_-]+$ ]] || die "init: --slash must look like /brigadier or /brigadier-skill:brigadier"
+  [[ -z "${BRIG_WORKER:-}" ]] || die "workers don't start runs"
+  local b; b="$(pick_backend)" || die "$(no_terminal_msg)"
+  load_backend "$b"
+  local id base n=1; base="$(date +%Y%m%d-%H%M)-$slug"; id="$base"
+  while [[ -e "$BRIG_HOME/runs/$id" ]]; do n=$((n + 1)); id="$base-$n"; done
+  RUN="$BRIG_HOME/runs/$id"
+  REPO="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+  mkdir -p "$RUN/workers" "$RUN/msgs"
+  {
+    printf 'RUN_ID=%q\n' "$id"
+    printf 'REPO=%q\n' "$REPO"
+    printf 'BACKEND=%q\n' "$b"
+    printf 'SLASH=%q\n' "$slash"
+    printf 'CREATED=%q\n' "$(date '+%Y-%m-%d %H:%M')"
+  } >"$RUN/run.env"
+  local extra; extra="$(be_init_run "$RUN" "$slug")" || { rm -rf "$RUN"; exit 1; }
+  printf '%s\n' "$extra" >>"$RUN/run.env"
+  # shellcheck disable=SC1091
+  source "$RUN/run.env"
+  bind_identity "$RUN"
+  log_event "init $id backend=$b mode=${MODE:-?}"
+  echo "$RUN"
+  echo "BRIG_RUN=$id"
+  echo "backend: $b ($MODE)"
+  be_watch_hint
+}
+
+# Bind this session to a run (resume, or a second tab).
+cmd_use() {
+  local id="${1:?usage: brig use <run-id>}"
+  [[ "$id" =~ ^[A-Za-z0-9._-]+$ && -f "$BRIG_HOME/runs/$id/run.env" ]] || die "no such run: $id"
+  bind_identity "$BRIG_HOME/runs/$id"
+  echo "$BRIG_HOME/runs/$id"
+}
+cmd_run() { run_dir; }
+cmd_runs() {
+  local e; [[ -d "$BRIG_HOME/runs" ]] || return 0
+  # shellcheck disable=SC2012 # run ids are [A-Za-z0-9-] by construction; ls -t gives newest first
+  for e in $(ls -1t "$BRIG_HOME/runs" | head -20); do
+    if [[ -f "$BRIG_HOME/runs/$e/finished" ]]; then echo "$e  finished"; else echo "$e  active"; fi
+  done
+}
+
+render_protocol() {
+  local wid="$1" d="$2" others="$3" slug="$4" t allowed
+  t="$(cat "$SKILL_DIR/worker-protocol.md")"
+  if [[ "$BRIG_ALLOWED_MODELS" == "*" ]]; then allowed="any model your Claude Code offers"; else allowed="only these models: $BRIG_ALLOWED_MODELS"; fi
+  t="${t//"{{WID}}"/$wid}"
+  t="${t//"{{DIR}}"/$d}"
+  t="${t//"{{REPO}}"/$REPO}"
+  t="${t//"{{OTHERS}}"/$others}"
+  t="${t//"{{RUN_SLUG}}"/$slug}"
+  t="${t//"{{ALLOWED_MODELS}}"/$allowed}"
+  t="${t//"{{DEFAULT_MODEL}}"/$BRIG_DEFAULT_MODEL}"
+  t="${t//"{{CHORE_MODEL}}"/$BRIG_CHORE_MODEL}"
+  t="${t//"{{MAX_EFFORT}}"/$BRIG_MAX_EFFORT}"
+  printf '%s\n' "$t"
+}
+
+# brig spawn <wid> <task-file> [--agent claude|codex] [--title T] [--model M] [--effort E] [--continues WID]...
+cmd_spawn() {
+  local wid="${1:?usage: brig spawn <wid> <task-file> [flags]}" taskf="${2:?task file}"; shift 2
+  open_run
+  local agent=claude title="" model="" effort="$BRIG_DEFAULT_EFFORT" prev=()
+  while (( $# )); do
+    case "$1" in
+      --agent) agent="$2"; shift 2 ;;
+      --title) title="$2"; shift 2 ;;
+      --model) model="$2"; shift 2 ;;
+      --effort) effort="$2"; shift 2 ;;
+      --continues) prev+=("$2"); shift 2 ;;
+      *) die "spawn: unknown flag $1" ;;
+    esac
+  done
+  [[ "$wid" =~ ^[A-Za-z0-9_-]+$ ]] || die "worker id must be letters, digits, '-' or '_' (e.g. w01)"
+  [[ -f "$taskf" ]] || die "task file not found: $taskf"
+  check_effort "$effort"
+  check_permission_mode
+  case "$agent" in
+    claude) model="$(claude_model "$model")" ;;
+    codex) codex_on || die "Codex workers need the 'codex' CLI on PATH (and BRIG_CODEX not 'off')"
+           [[ "$model" != *claude* ]] || die "codex model '$model' makes no sense" ;;
+    *) die "agent must be claude or codex" ;;
+  esac
+  local d="$RUN/workers/$wid"
+  [[ -e "$d" ]] && die "worker $wid already exists (never reuse a worker id)"
+  # Successors don't count against the cap while their predecessors are still open.
+  local live=0 w p skip
+  for w in $(live_workers); do
+    skip=""; for p in ${prev[@]+"${prev[@]}"}; do [[ "$p" == "$w" ]] && skip=1; done
+    [[ -n "$skip" ]] || live=$((live + 1))
+  done
+  (( live < BRIG_MAX_WORKERS )) || die "already $live live workers (BRIG_MAX_WORKERS=$BRIG_MAX_WORKERS); close one first"
+  mkdir -p "$d"
+
+  local others slug; others="$(live_workers | tr '\n' ' ')"; slug="${RUN_ID#*-*-}"
+  {
+    render_protocol "$wid" "$d" "${others:-none}" "$slug"
+    if (( ${#prev[@]} )); then
+      echo; echo "## You are continuing someone else's work"; echo
+      echo "Earlier workers ran out of context on this same task. Read their handoffs in order, newest last. The newest one is authoritative:"; echo
+      for p in "${prev[@]}"; do echo "- $RUN/workers/$p/handoff.md"; done
+      echo; echo "Before touching anything, check the real state with \`git log --oneline -15\` and \`git status\`. Don't redo finished steps and don't repeat any approval step the handoff says already happened. Your own status, report and handoff files live in YOUR private directory above, not in a predecessor's."
+    fi
+    echo; echo "## Your task"; echo
+    cat "$taskf"
+  } >"$d/task.md"
+  echo "$agent" >"$d/agent"
+  local kickoff="Read $d/task.md and follow it exactly. It holds your whole task and the protocol for this session."
+
+  {
+    echo '#!/usr/bin/env bash'
+    echo "# Worker $wid of run $RUN_ID (written by brig spawn)."
+    echo "cd $(q "$REPO") || exit 1"
+    clean_env_lines
+    echo "export BRIG_WORKER=$(q "$wid") BRIG_WORKER_DIR=$(q "$d") BRIG_RUN=$(q "$RUN") BRIG_SKILL_DIR=$(q "$SKILL_DIR")"
+    if [[ "$agent" == claude ]]; then
+      claude_settings_json "bash $(q "$BRIG_SCRIPT") _hook" "$d" >"$d/settings.json"
+      printf 'exec claude --permission-mode %s --disallowedTools AskUserQuestion EnterPlanMode ExitPlanMode' "$(q "$BRIG_PERMISSION_MODE")"
+      printf ' --settings %s --name %s --model %s --effort %s' "$(q "$d/settings.json")" "$(q "$wid${title:+ · $title}")" "$(q "$model")" "$(q "$effort")"
+      printf ' %s\n' "$(q "$kickoff")"
+    else
+      echo "exec bash $(q "$SKILL_DIR/scripts/codex-worker") $(q "$d") $(q "$REPO") $(q "$effort") $(q "$kickoff") $(q "$model") $(q "$BRIG_PERMISSION_MODE")"
+    fi
+  } >"$d/launch.sh"
+  chmod +x "$d/launch.sh"
+  echo "$agent${model:+ $model} effort=$effort" >"$d/model"
+  echo "$title" >"$d/title"
+
+  now >"$d/prompt.ts"
+  echo live >"$d/.state"
+  local sid
+  sid="$(be_spawn "$REPO" "$d/launch.sh" "⚙ $wid${title:+ · $title}")" || { echo closed >"$d/.state"; die "could not open a terminal for $wid"; }
+  echo "$sid" >"$d/surface"
+  log_event "spawn $wid [$(cat "$d/model")] ${title:+($title) }${prev[*]:+continues ${prev[*]}}"
+  echo "spawned $wid [$(cat "$d/model")] surface=$sid dir=$d"
+  be_watch_hint
+}
+
+# brig send <wid> <text...>   (single line; for long text write a file and send its path)
+cmd_send() {
+  local wid="${1:?usage: brig send <wid> <text>}"; shift
+  open_run
+  local d; d="$(wdir "$wid")"
+  local msg="$*"; msg="${msg//$'\n'/ }"
+  [[ -n "$msg" ]] || die "empty message"
+  rm -f "$d/.stall_flag"
+  if [[ "$(agent_of "$d")" == codex ]]; then
+    # The codex-worker loop picks this up as soon as the current turn finishes.
+    local n; n=$(( $(readf "$d/inbox.seq" 0) + 1 )); echo "$n" >"$d/inbox.seq"
+    mkdir -p "$d/inbox"; printf '%s\n' "$msg" >"$d/inbox/$(printf '%08d' "$n").msg"
+  else
+    local sid; sid="$(readf "$d/surface")"
+    now >"$d/prompt.ts"
+    be_send_text "$sid" "$msg"
+    sleep 0.4
+    be_send_enter "$sid"
+  fi
+  log_event "send $wid: ${msg:0:160}"
+  echo "sent to $wid"
+}
+
+cmd_handoff() {
+  local wid="${1:?usage: brig handoff <wid>}"
+  cmd_send "$wid" "BRIGADIER: HANDOFF. Your context is filling up. Follow the Handoff section of your protocol now: finish only the atomic step in progress, get the tree coherent, write handoff.md, write 'handoff' to your status file, then end your turn."
+}
+
+# The rebirth successor can be inspected or closed by the name "successor".
+target_surface() {
+  if [[ "$1" == successor ]]; then readf "$RUN/rebirth.surface"; else readf "$(wdir "$1")/surface"; fi
+}
+
+cmd_kill() {
+  local wid="${1:?usage: brig kill <wid>}"
+  open_run
+  local sid; sid="$(target_surface "$wid")"; [[ -n "$sid" ]] || die "$wid has no terminal"
+  [[ "$wid" == successor ]] || echo closed >"$(wdir "$wid")/.state"
+  if be_live_ids 2>/dev/null | grep -qxF "$sid"; then be_close "$sid"; fi
+  log_event "kill $wid"
+  echo "closed $wid"
+}
+
+cmd_last() {
+  open_run
+  local d; d="$(wdir "${1:?usage: brig last <wid>}")"
+  if [[ -f "$d/stop.json" ]]; then jq -r '.last_assistant_message // ""' "$d/stop.json"; else echo "(no turn has ended yet)"; fi
+}
+cmd_screen() {
+  open_run
+  local sid; sid="$(target_surface "${1:?usage: brig screen <wid> [lines]}")"
+  be_read "$sid" "${2:-40}"
+}
+
+# brig rebirth [note-file]: hand this run to a fresh brigadier session, wait until it confirms
+# (it runs 'brig ack' once it has recovered), then close this tab. Run it in the background.
+cmd_rebirth() {
+  local note="${1:-}"
+  [[ -z "${BRIG_WORKER:-}" ]] || die "workers hand off with handoff.md; rebirth is for the brigadier"
+  open_run
+  [[ -z "$note" || -f "$note" ]] || die "no such note: $note"
+  check_permission_mode
+  local model; model="$(claude_model "")"
+  local prompt="${SLASH:-/brigadier} resume $RUN_ID"
+  [[ -n "$note" ]] && prompt+=". First read $note: it is the previous brigadier's note to you."
+  local skip=false; [[ "$BRIG_PERMISSION_MODE" == bypassPermissions ]] && skip=true
+  jq -n --argjson skip "$skip" '{skipDangerousModePermissionPrompt: $skip}' >"$RUN/rebirth-settings.json"
+  {
+    echo '#!/usr/bin/env bash'
+    echo "# Fresh brigadier for run $RUN_ID (written by brig rebirth)."
+    echo "cd $(q "$REPO") || exit 1"
+    clean_env_lines
+    echo "export BRIG_RUN=$(q "$RUN")"
+    printf 'exec claude --permission-mode %s --settings %s --model %s --effort %s --name %s %s\n' \
+      "$(q "$BRIG_PERMISSION_MODE")" "$(q "$RUN/rebirth-settings.json")" "$(q "$model")" "$(q "$BRIG_DEFAULT_EFFORT")" \
+      "$(q "Brigadier · ${RUN_ID#*-*-}")" "$(q "$prompt")"
+  } >"$RUN/rebirth.sh"
+  chmod +x "$RUN/rebirth.sh"
+  rm -f "$RUN/rebirth.ack"
+  local self; self="$(be_self_id)"
+  local sid; sid="$(be_spawn "$REPO" "$RUN/rebirth.sh" "◆ Brigadier · ${RUN_ID#*-*-}")" || die "could not open a terminal for the new brigadier"
+  echo "$sid" >"$RUN/rebirth.surface"
+  log_event "rebirth started -> surface $sid"
+  echo "new brigadier starting in $sid; waiting up to ${BRIG_REBIRTH_TIMEOUT}s for it to confirm (brig ack)"
+  local deadline=$(( $(now) + BRIG_REBIRTH_TIMEOUT )) ids
+  while [[ ! -f "$RUN/rebirth.ack" ]]; do
+    if (( $(now) >= deadline )); then
+      log_event "rebirth timeout: $sid never confirmed"
+      echo "REBIRTH_TIMEOUT: the new brigadier ($sid) did not confirm within ${BRIG_REBIRTH_TIMEOUT}s. This session stays in charge. Look at it with 'brig screen successor', close it with 'brig kill successor', then carry on."
+      return 1
+    fi
+    if ids="$(be_live_ids 2>/dev/null)" && ! grep -qxF "$sid" <<<"$ids"; then
+      log_event "rebirth failed: $sid closed before confirming"
+      echo "REBIRTH_FAILED: the new brigadier's terminal ($sid) closed before it confirmed. This session stays in charge."
+      return 1
+    fi
+    sleep 2
+  done
+  log_event "rebirth confirmed by $sid"
+  if [[ -n "$self" ]]; then
+    echo "REBIRTH_OK: the new brigadier confirmed. Closing this tab in 5s."
+    local closer; closer="$(declare -f tm be_close 2>/dev/null || true)"
+    nohup bash -c "$closer
+      TMUX_SOCKET=$(q "${TMUX_SOCKET:-}") TMUX_SOCKET_PATH=$(q "${TMUX_SOCKET_PATH:-}")
+      sleep 5; be_close $(q "$self")" >/dev/null 2>&1 &
+    disown || true
+  else
+    echo "REBIRTH_OK: the new brigadier confirmed and now runs this run. $(be_watch_hint) This session can stop here; close it whenever you like."
+  fi
+}
+
+# brig ack: a reborn brigadier confirms it has recovered (ledger read, wait started).
+cmd_ack() {
+  open_run
+  bind_identity "$RUN"
+  { identity; date '+%Y-%m-%d %H:%M:%S'; } >"$RUN/rebirth.ack"
+  log_event "ack from $(identity || true)"
+  echo "acknowledged"
+}
+
+cmd_status() {
+  open_run
+  printf '%-5s %-7s %-9s %-5s %-6s %-5s %-28s %s\n' WID STATE STATUS CTX BUSY 5H MODEL TITLE
+  local w d summary="" st b
+  for w in $(workers); do
+    d="$RUN/workers/$w"
+    st="$(readf "$d/.state" '?')"; b="idle"; busy "$d" && b="busy"; [[ "$st" == closed ]] && b="-"
+    printf '%-5s %-7s %-9s %-5s %-6s %-5s %-28s %s\n' "$w" "$st" "$(readf "$d/status" '-')" "$(ctx_label "$d")" "$b" "$(rate_pct "$d")%" "$(readf "$d/model")" "$(readf "$d/title")"
+    [[ "$st" == live ]] && summary+="$w $b ctx$(ctx_label "$d") · "
+  done
+  be_status "${summary% · }"
+  [[ "$MODE" == background ]] && be_watch_hint
+  true
+}
+
+cmd_watch() {
+  while :; do
+    clear 2>/dev/null || true
+    echo "Brigadier · $(date '+%H:%M:%S')"; echo
+    ( cmd_status ) 2>&1 || true
+    echo; echo "This window only shows status. Leave tmux without stopping anything: Ctrl-b d"
+    sleep "${BRIG_WATCH_INTERVAL:-5}"
+  done
+}
+
+# brig check: after a restart, compare each live worker's busy flag with its screen.
+cmd_check() {
+  open_run
+  local w d flag st verdict
+  for w in $(live_workers); do
+    d="$RUN/workers/$w"
+    if [[ "$(agent_of "$d")" != claude ]]; then echo "$w codex (no screen check)"; continue; fi
+    if busy "$d"; then flag=busy; else flag=idle; fi; st="$(screen_state "$d")"
+    verdict=ok
+    [[ $flag == busy && ( $st == interrupted || $st == idle ) ]] && verdict="INTERRUPTED: tell it to clean up and continue"
+    [[ $st == background ]] && verdict="ok: waiting on its own background job"
+    [[ $flag == idle && $(readf "$d/status") == working ]] && verdict="waiting for your answer (brig last $w)"
+    echo "$w flag=$flag screen=$st status=$(readf "$d/status" -) :: $verdict"
+  done
+}
+
+# brig wait [timeout-seconds]: block until a worker needs attention, then print events.
+cmd_wait() {
+  local timeout="${1:-1800}"
+  open_run
+  local deadline=$(( $(now) + timeout ))
+  while :; do
+    local events=() surfaces="" have_surfaces=""
+    if surfaces="$(be_live_ids 2>/dev/null)"; then have_surfaces=1; fi
+    if [[ -z "${BRIG_WORKER:-}" && -n "${CLAUDE_CODE_SESSION_ID:-}" && "$(readf "$RUN/.rebirth_flag")" != "$CLAUDE_CODE_SESSION_ID" ]]; then
+      local st_; st_="$(self_tokens)"
+      if (( st_ >= BRIG_SELF_TOKENS )); then
+        echo "$CLAUDE_CODE_SESSION_ID" >"$RUN/.rebirth_flag"
+        events+=("REBIRTH_DUE your own context is ~$(( st_ / 1000 ))k tokens (limit $(( BRIG_SELF_TOKENS / 1000 ))k): update the ledger, then 'brig rebirth [note-file]' in the background")
+      fi
+    fi
+    local w d
+    for w in $(live_workers); do
+      d="$RUN/workers/$w"
+      local sm seen; sm="$(mtime "$d/stop.json")"; seen="$(readf "$d/.seen_stop" 0)"
+      if [[ -n "$have_surfaces" ]] && ! grep -qxF "$(readf "$d/surface")" <<<"$surfaces"; then
+        events+=("GONE $w: its terminal no longer exists (crashed or closed by hand)")
+        echo closed >"$d/.state"; continue
+      fi
+      if (( sm > seen )); then
+        echo "$sm" >"$d/.seen_stop"
+        local msg; msg="$(jq -r '.last_assistant_message // ""' "$d/stop.json" | tr '\n' ' ' | cut -c1-300)"
+        events+=("TURN_END $w status=$(readf "$d/status" '-') ctx=$(ctx_label "$d") :: $msg")
+      fi
+      if [[ "$(agent_of "$d")" == claude ]]; then
+        local c t; c="$(ctx_pct "$d")"; t="$(ctx_tokens "$d")"
+        if (( c >= BRIG_CTX_PCT || t >= BRIG_CTX_TOKENS )) && [[ ! -f "$d/.ctx_flag" ]]; then
+          touch "$d/.ctx_flag"; events+=("CTX_HIGH $w ctx=${c}% (~$(( t / 1000 ))k tokens; limits ${BRIG_CTX_PCT}% / $(( BRIG_CTX_TOKENS / 1000 ))k): send 'brig handoff $w'")
+        fi
+        if [[ -f "$d/precompact.json" && ! -f "$d/.compact_flag" ]]; then
+          touch "$d/.compact_flag"; events+=("COMPACTING $w: auto-compaction started before handoff; ask for a handoff right after it finishes")
+        fi
+        local nl ns; nl=0; [[ -f "$d/notify.jsonl" ]] && nl="$(wc -l <"$d/notify.jsonl" | tr -d ' ')"; ns="$(readf "$d/.seen_notify" 0)"
+        if (( nl > ns )); then
+          echo "$nl" >"$d/.seen_notify"
+          local n; while IFS= read -r n; do
+            case "$(jq -r '.notification_type // ""' <<<"$n")" in
+              permission_prompt|elicitation_dialog|elicitation_url_dialog|agent_needs_input)
+                events+=("NEEDS_INPUT $w: $(jq -r '.message // .notification_type' <<<"$n" | cut -c1-200); inspect with 'brig screen $w'") ;;
+              quota_auto_resume_*) events+=("QUOTA $w: $(jq -r '.notification_type' <<<"$n")") ;;
+            esac
+          done < <(tail -n "$(( nl - ns ))" "$d/notify.jsonl")
+        fi
+        local rp rr; rp="$(rate_pct "$d")"; rr="$(rate_reset "$d")"
+        if (( rp >= BRIG_RATE_PCT )) && [[ "$(readf "$RUN/.rate_flag")" != "$rr" ]]; then
+          echo "$rr" >"$RUN/.rate_flag"
+          events+=("RATE_LIMIT Claude 5h window at ${rp}%, resets $(hhmm "$rr") (epoch $rr)")
+        fi
+      fi
+      if busy "$d"; then
+        local tm; tm="$(transcript_mtime "$d")"
+        if [[ "$(agent_of "$d")" == claude ]] && (( $(now) - tm > BRIG_IDLE_SEC )) && [[ "$(readf "$d/.screen_flag")" != "$tm" ]]; then
+          local ss; ss="$(screen_state "$d")"
+          case "$ss" in
+            interrupted|idle)
+              echo "$tm" >"$d/.screen_flag"
+              events+=("INTERRUPTED $w: marked busy but its screen is $ss (a cut-off turn fires no Stop hook); check 'brig screen $w', then tell it to clean up and continue") ;;
+          esac
+        fi
+        if (( $(now) - tm > BRIG_STALL_MIN * 60 )) && [[ "$(readf "$d/.stall_flag")" != "$tm" ]]; then
+          echo "$tm" >"$d/.stall_flag"
+          events+=("STALL $w: busy but no transcript activity for $(( ($(now) - tm) / 60 )) min; check 'brig screen $w'")
+        fi
+      fi
+    done
+    if (( ${#events[@]} )); then
+      local e; for e in "${events[@]}"; do log_event "$e"; echo "» $e"; done
+      echo; cmd_status; return 0
+    fi
+    if [[ -z "$(live_workers)" ]]; then echo "NO_LIVE_WORKERS"; cmd_status; return 0; fi
+    if (( $(now) >= deadline )); then echo "HEARTBEAT (no events for ${timeout}s)"; cmd_status; return 0; fi
+    sleep "$BRIG_POLL"
+  done
+}
+
+# brig finish "<one-line outcome>": mark the run finished, notify, tidy the terminal.
+cmd_finish() {
+  open_run
+  local msg="${1:-Run finished}"
+  date '+%Y-%m-%d %H:%M' >"$RUN/finished"
+  be_status_clear
+  be_notify "Brigadier finished" "$msg — REPORT: $RUN/REPORT.md"
+  be_finish
+  log_event "finish: $msg"
+  echo "finished $RUN_ID (report: $RUN/REPORT.md)"
+}
+
+# brig review code (--base REF | --commit SHA | --uncommitted) [--repo DIR] [--out FILE] [--effort E] [--focus TEXT]
+# brig review plan <file> [--repo DIR] [--out FILE] [--effort E] [--focus TEXT]
+# Read-only review by Codex when available, else by a read-only Claude session. Prints and saves it.
+cmd_review() {
+  local kind="${1:?usage: brig review code|plan ...}"; shift
+  local target=() plan="" out="" effort="" focus="" repo=""
+  if [[ "$kind" == plan ]]; then plan="${1:?plan file}"; shift; [[ -f "$plan" ]] || die "no such file: $plan"; fi
+  while (( $# )); do
+    case "$1" in
+      --base|--commit) target=("$1" "$2"); shift 2 ;;
+      --uncommitted) target=(--uncommitted); shift ;;
+      --repo) repo="$2"; shift 2 ;;
+      --out) out="$2"; shift 2 ;;
+      --effort) effort="$2"; shift 2 ;;
+      --focus) focus="$2"; shift 2 ;;
+      *) die "review: unknown flag $1" ;;
+    esac
+  done
+  if RUN="$(run_dir 2>/dev/null)"; then load_config "$RUN"; fi
+  effort="${effort:-$BRIG_DEFAULT_EFFORT}"
+  check_effort "$effort"
+  local who; who="$(reviewer)"
+  [[ "$who" != off ]] || die "reviews are off (BRIG_REVIEWER=off)"
+  [[ -n "$out" ]] || out="$(mktemp "${TMPDIR:-/tmp}/brig-review.XXXXXX")"
+  # shellcheck disable=SC1091
+  if [[ -z "$repo" ]]; then
+    if git rev-parse --show-toplevel >/dev/null 2>&1; then repo="$(git rev-parse --show-toplevel)"
+    elif [[ -n "${RUN:-}" ]]; then repo="$(source "$RUN/run.env"; echo "$REPO")"
+    else die "review: not in a git checkout; pass --repo DIR"; fi
+  fi
+  [[ -d "$repo" ]] || die "review: no such repo $repo"
+  local scope="" prompt
+  case "$kind" in
+    code)
+      (( ${#target[@]} )) || die "review code needs --base REF, --commit SHA or --uncommitted"
+      if [[ "${target[0]}" == --base ]]; then
+        git -C "$repo" rev-parse --verify -q "${target[1]}^{commit}" >/dev/null || die "review: ${target[1]} is not a commit in $repo"
+        [[ -n "$(git -C "$repo" diff --name-only "${target[1]}"...HEAD)" ]] \
+          || die "review: no changes between ${target[1]} and HEAD in $repo (wrong checkout? pass --repo DIR)"
+      fi
+      case "${target[0]}" in
+        --base) scope="the changes in \`git diff ${target[1]}...HEAD\` (commits \`git log ${target[1]}..HEAD\`)" ;;
+        --commit) scope="the changes in commit ${target[1]} (\`git show ${target[1]}\`)" ;;
+        *) scope="the uncommitted changes (\`git diff HEAD\` plus untracked files)" ;;
+      esac
+      prompt="Review $scope in this repository. Report concrete bugs and risks with file:line, severity (high/medium/low) and the fix you recommend. Do not modify any files.${focus:+ Focus only on: $focus.}"
+      ;;
+    plan)
+      prompt="Review the implementation plan in $plan for the project in this repository. Read it, and the project's own plan and decision documents it relies on (e.g. docs/, AGENTS.md, CLAUDE.md, README). Report only concrete problems: contradictions with the project's documented plan or settled decisions, missing or out-of-scope work, wrong or outdated libraries, versions or APIs, risky ordering, needless complexity. For each problem give severity (high/medium/low), the issue, and the fix you recommend. End with one verdict line: APPROVE, APPROVE WITH CHANGES, or REVISE. Do not modify any files.${focus:+ Focus: $focus}"
+      ;;
+    *) die "review kind must be code or plan" ;;
+  esac
+  echo "reviewing $repo with $who" >&2
+  if [[ "$who" == codex ]]; then
+    local cfg=(-c "model_reasoning_effort=\"$effort\"")
+    if [[ "$kind" == code && -z "$focus" ]]; then
+      (cd "$repo" && codex exec review --ephemeral "${cfg[@]}" "${target[@]}" -o "$out" </dev/null >/dev/null 2>&1) || die "codex review failed"
+    else
+      # `codex exec review` rejects a custom prompt together with --base/--commit/--uncommitted,
+      # so a focused review (and a plan review) runs as a read-only exec with the scope in the prompt.
+      (cd "$repo" && codex exec --ephemeral -s read-only "${cfg[@]}" -o "$out" "$prompt" </dev/null >/dev/null 2>&1) || die "codex review failed"
+    fi
+  else
+    local model; model="$(claude_model "")"
+    (cd "$repo" && printf '%s' "$prompt" | env -u CLAUDECODE claude -p --model "$model" --effort "$effort" --permission-mode dontAsk \
+      --allowedTools "Read" "Grep" "Glob" "Bash(git diff:*)" "Bash(git log:*)" "Bash(git show:*)" "Bash(git status:*)" \
+      --disallowedTools "Edit" "Write" "NotebookEdit" >"$out" 2>/dev/null) || die "claude review failed"
+  fi
+  cat "$out"; echo; echo "(saved to $out)"
+}
+
+cmd_config() {
+  local r="" k src
+  if r="$(run_dir 2>/dev/null)"; then load_config "$r"; fi
+  echo "user config: $USER_CONFIG $([[ -f "$USER_CONFIG" ]] && echo "(found)" || echo "(not created; copy $SKILL_DIR/config.example.env there to change settings)")"
+  [[ -n "$r" ]] && echo "run config:  $r/config.env $([[ -f "$r/config.env" ]] && echo "(found)" || echo "(none)")"
+  for k in $BRIG_KEYS; do
+    if [[ "$ENV_SET" == *" $k "* ]]; then src="env"
+    elif [[ -n "$r" && -f "$r/config.env" ]] && grep -Eq "^(export )?$k=" "$r/config.env"; then src=run
+    elif [[ -f "$USER_CONFIG" ]] && grep -Eq "^(export )?$k=" "$USER_CONFIG"; then src=user
+    else src=default; fi
+    printf '%-22s %-24s %s\n' "$k" "${!k}" "$src"
+  done
+}
+
+cmd_doctor() {
+  local bad=0 v b
+  ok() { printf '  ok    %s\n' "$*"; }
+  warn() { printf '  note  %s\n' "$*"; }
+  no() { printf '  FAIL  %s\n' "$*"; bad=1; }
+  echo "brig doctor (Brigadier $BRIG_VERSION)"
+  if (( BASH_VERSINFO[0] > 3 || (BASH_VERSINFO[0] == 3 && BASH_VERSINFO[1] >= 2) )); then ok "bash $BASH_VERSION"; else no "bash $BASH_VERSION is too old (need 3.2+)"; fi
+  if command -v jq >/dev/null 2>&1; then ok "jq $(jq --version 2>/dev/null)"; else no "jq not found. $(install_hint jq)"; fi
+  if command -v git >/dev/null 2>&1; then ok "$(git --version)"; else no "git not found. $(install_hint git)"; fi
+  if command -v claude >/dev/null 2>&1; then ok "claude $(claude --version 2>/dev/null | head -1)"
+  else no "claude not on PATH. Install Claude Code: https://code.claude.com/docs/en/setup"; fi
+  if [[ "$BRIG_CODEX" == off ]]; then warn "Codex off (BRIG_CODEX=off); reviews use Claude"
+  elif command -v codex >/dev/null 2>&1; then ok "codex $(codex --version 2>/dev/null | head -1) (reviews and Codex workers on)"
+  else warn "codex not found (optional): reviews use a read-only Claude session; install the Codex CLI to add a second reviewer and Codex workers"; fi
+  if b="$(pick_backend)"; then
+    if [[ "$b" == cmux ]]; then
+      if [[ -n "${CMUX_WORKSPACE_ID:-}" ]] && command -v cmux >/dev/null 2>&1; then ok "terminal: cmux (workspace $CMUX_WORKSPACE_ID)"
+      else no "BRIG_BACKEND=cmux but this isn't a cmux terminal (or cmux isn't on PATH)"; fi
+    elif [[ "$b" == tmux ]]; then
+      if ! command -v tmux >/dev/null 2>&1; then no "tmux not found. $(install_hint tmux)"
+      elif [[ -n "${TMUX:-}" && "$BRIG_TMUX_MODE" != background ]]; then ok "terminal: tmux $(tmux -V | cut -d' ' -f2), attached (workers open as windows in this session)"
+      else ok "terminal: tmux $(tmux -V | cut -d' ' -f2), background mode (workers run in a detached session brigadier-<slug>; watch with: tmux attach -t brigadier-<slug>, leave with Ctrl-b d)"; fi
+    elif [[ -f "$SKILL_DIR/scripts/backends/$b.sh" ]]; then ok "terminal: $b (BRIG_BACKEND)"
+    else no "BRIG_BACKEND=$b: no such backend in $SKILL_DIR/scripts/backends"; fi
+  else
+    no "no terminal backend: $(no_terminal_msg)"
+  fi
+  if mkdir -p "$BRIG_HOME" 2>/dev/null && [[ -w "$BRIG_HOME" ]]; then ok "state dir $BRIG_HOME"; else no "cannot write $BRIG_HOME (set BRIG_HOME to a writable dir)"; fi
+  if [[ -f "$USER_CONFIG" ]]; then
+    # shellcheck disable=SC1090
+    if (set +u; source "$USER_CONFIG") >/dev/null 2>&1; then ok "config $USER_CONFIG"; else no "config $USER_CONFIG has a shell syntax error"; fi
+  else warn "no config file yet; defaults apply (cp $SKILL_DIR/config.example.env $USER_CONFIG to change them)"; fi
+  if (( $(effort_rank "$BRIG_MAX_EFFORT") == 0 )); then no "BRIG_MAX_EFFORT=$BRIG_MAX_EFFORT is not low|medium|high|xhigh|max"
+  elif (( $(effort_rank "$BRIG_DEFAULT_EFFORT") == 0 || $(effort_rank "$BRIG_DEFAULT_EFFORT") > $(effort_rank "$BRIG_MAX_EFFORT") )); then
+    no "BRIG_DEFAULT_EFFORT=$BRIG_DEFAULT_EFFORT must be a valid effort at or below BRIG_MAX_EFFORT=$BRIG_MAX_EFFORT"
+  else ok "effort: default $BRIG_DEFAULT_EFFORT, max $BRIG_MAX_EFFORT"; fi
+  if model_allowed "$BRIG_DEFAULT_MODEL"; then ok "models: default $BRIG_DEFAULT_MODEL, chores $BRIG_CHORE_MODEL, allowed: $BRIG_ALLOWED_MODELS"
+  else no "BRIG_DEFAULT_MODEL=$BRIG_DEFAULT_MODEL is not in BRIG_ALLOWED_MODELS ($BRIG_ALLOWED_MODELS)"; fi
+  if v="$( (check_permission_mode) 2>&1)"; then ok "worker permission mode: $BRIG_PERMISSION_MODE"; else no "${v#brig: }"; fi
+  if (( bad == 0 )); then echo "all good"; else echo "fix the FAIL lines first"; return 1; fi
+}
+
+cmd_version() { echo "brig $BRIG_VERSION"; }
+
+cmd_help() {
+  cat <<EOF
+brig $BRIG_VERSION: Brigadier worker control (runs live in $BRIG_HOME/runs)
+  doctor                          check this machine (terminal backend, claude, codex, jq, config)
+  config                          effective settings and where each comes from
+  init <slug> [--slash CMD]       new run in this repo; prints BRIG_RUN=<run-id> (pass it on every later call)
+  use <run-id> | runs | run       bind this session to a run / list runs / print the bound run
+  spawn <wid> <task-file> [--agent claude|codex] [--title T] [--model M] [--effort E] [--continues WID]...
+  send <wid> <text>               message a worker (typed into Claude; queued for Codex)
+  handoff <wid>                   standard "write handoff.md and stop" request
+  wait [seconds]                  block until an event: TURN_END, CTX_HIGH, COMPACTING, NEEDS_INPUT, INTERRUPTED,
+                                  STALL, GONE, RATE_LIMIT, REBIRTH_DUE, NO_LIVE_WORKERS or HEARTBEAT
+  status | watch                  table of workers / refreshing table (background tmux mode shows it in window 0)
+  check                           busy flag vs screen per worker: finds turns cut off by Esc or a restart
+  last <wid>                      the worker's last reply in full
+  screen <wid|successor> [lines]  the worker's terminal screen
+  kill <wid|successor>            close a worker's terminal
+  rebirth [note-file]             brigadier only: start a fresh brigadier for this run, wait for its 'brig ack', then close this one
+  ack                             a reborn brigadier confirms it has recovered
+  finish "<outcome>"              mark the run finished, notify, clean up the background tmux session
+  review code (--base REF|--commit SHA|--uncommitted) [--repo DIR] [--out F] [--effort E] [--focus T]
+  review plan <file> [--repo DIR] [--out F] [--effort E] [--focus T]
+                                  read-only review: Codex if available, else Claude (BRIG_REVIEWER)
+  version | help
+Settings: $USER_CONFIG, per run <run>/config.env, or BRIG_* environment variables (see config.example.env).
+EOF
+}
+
+sub="${1:-help}"; shift || true
+case "$sub" in
+  _hook) cmd__hook "$@" ;;
+  -h|--help) cmd_help ;;
+  --version) cmd_version ;;
+  init|use|run|runs|spawn|send|handoff|kill|rebirth|ack|last|screen|status|watch|check|wait|finish|review|config|doctor|version|help) "cmd_$sub" "$@" ;;
+  *) die "unknown command '$sub' (see 'brig help')" ;;
+esac

@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# codex-worker: runs a Brigadier worker on the Codex CLI inside a terminal tab or window.
+# Each turn is a `codex exec` (resumed on the same session); messages the brigadier queues
+# in <dir>/inbox become the next turns. Writes the same prompt.ts / stop.json / session.json
+# files the Claude hooks do, so `brig wait` treats both agents alike.
+#
+# usage: bash codex-worker <worker-dir> <repo> <effort> <kickoff> [model] [permission-mode]
+#   permission-mode bypassPermissions -> --dangerously-bypass-approvals-and-sandbox
+#   anything else                     -> workspace-write sandbox, never ask; the worker's own
+#                                        control dir is added as a writable root.
+# Only -c overrides and flags that both `codex exec` and `codex exec resume` accept are used,
+# so a resumed turn keeps exactly the same permissions as the first one.
+set -uo pipefail
+d="$1" repo="$2" effort="$3" kickoff="$4" model="${5:-}" perm="${6:-bypassPermissions}"
+
+case "$effort" in low|medium|high|xhigh|max) ;; *) echo "codex-worker: unknown effort '$effort'" >&2; exit 2 ;; esac
+cd "$repo" || exit 1
+mkdir -p "$d/inbox"
+
+flags=(-c "model_reasoning_effort=\"$effort\"")
+if [[ "$perm" == bypassPermissions ]]; then
+  flags+=(--dangerously-bypass-approvals-and-sandbox)
+else
+  roots="$(jq -cn --arg d "$d" '[$d]')"
+  flags+=(-c 'sandbox_mode="workspace-write"' -c 'approval_policy="never"' -c "sandbox_workspace_write.writable_roots=$roots")
+fi
+[[ -n "$model" ]] && flags+=(-m "$model")
+jq -n --arg t "$d/codex.log" '{transcript_path: $t}' >"$d/session.json"
+
+sid=""
+turn() {
+  date +%s >"$d/prompt.ts"
+  rm -f "$d/last.md"
+  if [[ -z "$sid" ]]; then
+    codex exec "${flags[@]}" -o "$d/last.md" "$1" </dev/null 2>&1 | tee -a "$d/codex.log"
+    sid="$(grep -m1 -Eo 'session id: [0-9a-f-]+' "$d/codex.log" | awk '{print $3}')"
+  else
+    codex exec resume "${flags[@]}" -o "$d/last.md" "$sid" "$1" </dev/null 2>&1 | tee -a "$d/codex.log"
+  fi
+  local m="(codex exited without a final message; see $d/codex.log)"
+  [[ -s "$d/last.md" ]] && m="$(cat "$d/last.md")"
+  jq -n --arg m "$m" '{last_assistant_message: $m}' >"$d/stop.json.tmp" && mv -f "$d/stop.json.tmp" "$d/stop.json"
+}
+
+turn "$kickoff"
+while [[ "$(cat "$d/.state" 2>/dev/null)" == live ]]; do
+  next="$(find "$d/inbox" -name '*.msg' 2>/dev/null | sort | head -1)"
+  if [[ -n "$next" ]]; then
+    msg="$(cat "$next")"; rm -f "$next"
+    printf '\n\033[1m── Brigadier ──\033[0m %s\n\n' "$msg"
+    turn "$msg"
+  else
+    sleep 3
+  fi
+done
