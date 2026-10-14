@@ -1,0 +1,13 @@
+# Launch drafts stay local and are never pushed.
+/launch/
+
+# OS and editor litter
+.DS_Store
+*.swp
+*~
+.idea/
+.vscode/
+
+# Local test scratch
+/tmp/
+*.log
