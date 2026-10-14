@@ -10,9 +10,7 @@ Brigadier is a Claude Code skill that keeps work moving while you sleep. It runs
 
 **Runs in any terminal.** Uses cmux or tmux if you have them, and starts tmux in the background if you don't.
 
-<!-- DEMO: record a short screen capture (a goal going in, worker tabs/windows appearing,
-     a handoff, the morning REPORT.md), save it as docs/demo.gif, then uncomment the line below. -->
-<!-- ![Brigadier running a crew of workers overnight](docs/demo.gif) -->
+![Brigadier running a crew of workers on a small two-phase goal (real run, sped up)](docs/demo.gif)
 
 ## Install
 
