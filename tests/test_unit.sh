@@ -126,6 +126,39 @@ expect_has "review effort obeys the ceiling" "$out" "above BRIG_MAX_EFFORT"
 out="$(brig review code --base HEAD 2>&1)"
 expect_has "an empty change set fails loudly" "$out" "no changes between HEAD and HEAD"
 
+mkdir -p "$E_DIR/elsewhere"; out="$(cd "$E_DIR/elsewhere" && cp "$E_DIR/task.md" plan.md && brig review plan plan.md --repo "$E_DIR/repo" --out r4.md 2>&1)"
+expect_has "relative paths with --repo: the plan is found" "$(cat "$FAKE_LOG")" "$E_DIR/elsewhere/plan.md"
+check "relative paths with --repo: the review lands in the caller's dir" test -s "$E_DIR/elsewhere/r4.md"
+
+echo "== cmux input and paths with spaces"
+new_env cmux
+export BRIG_HOME="$E_DIR/home dir/brigadier"; mkdir -p "$BRIG_HOME/fake-modes"
+RID="$(run_id_of "$(brig init spaced)")"; export BRIG_RUN="$RID"
+fake_mode w01 ask
+brig spawn w01 "$E_DIR/task.md" >/dev/null
+out="$(brig wait 30)"; expect_has "a worker starts from a state dir with a space" "$out" "TURN_END w01 status=working"
+sid="$(surface_of w01)"
+sleep 1; brig send w01 'use \n literally' >/dev/null
+expect_has "text with a backslash is pasted, not typed" "$(cat "$FAKE_TERM_DIR/log")" "cmux send --paste --force --surface $sid -- use \\n literally"
+brig send w01 "1" >/dev/null
+expect_has "plain text is typed, even into an open dialog" "$(cat "$FAKE_TERM_DIR/log")" "cmux send --force --surface $sid -- 1"
+expect_has "Enter reaches an open dialog too" "$(cat "$FAKE_TERM_DIR/log")" "cmux send-key --force --surface $sid enter"
+brig kill w01 >/dev/null; brig finish "done" >/dev/null
+unset BRIG_RUN
+
+echo "== resuming a finished background run"
+new_env tmux-bg
+RID="$(run_id_of "$(brig init again)")"; export BRIG_RUN="$RID"
+brig finish "first night" >/dev/null
+check "finish removed the background session" test ! -d "$FAKE_TERM_DIR/sessions/brigadier-again"
+brig use "$RID" >/dev/null
+out="$(brig spawn w01 "$E_DIR/task.md" 2>&1)"; expect_has "spawn works after resume" "$out" "spawned w01"
+check "the background session is back" test -d "$FAKE_TERM_DIR/sessions/brigadier-again"
+check "the run is active again" test ! -f "$BRIG_HOME/runs/$RID/finished"
+out="$(brig wait 30)"; expect_has "and its worker reports in" "$out" "TURN_END w01 status=done"
+brig finish "done" >/dev/null
+unset BRIG_RUN
+
 echo "== codex workers"
 new_env cmux
 RID="$(run_id_of "$(brig init cx)")"; export BRIG_RUN="$RID"; R="$BRIG_HOME/runs/$RID"
