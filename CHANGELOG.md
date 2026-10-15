@@ -11,11 +11,20 @@ All notable changes to this project are documented here. The format follows
 - `brig send <wid> --file <path>` for long answers; inline messages over 2000 characters are refused with a pointer to it.
 - `REJECTED` event in `brig wait`: a Codex worker refused a queued message that didn't come from `brig send`.
 - Guardrails section in SKILL.md; doctor prints how Claude and Codex workers are allowed to act.
+- `brig key <wid> <key>...` presses keys in a worker's terminal (`enter`, `escape`, the arrows, `tab`, `space`, `1`–`9`) and refuses any other key. Every backend implements the new `be_send_key`. The brigadier uses it to answer `NEEDS_INPUT` dialogs instead of sending text.
+- Claude Code's "trust this folder" dialog: `brig spawn` notes when Claude Code hasn't trusted the worker's folder yet (it reads `.claude.json` and never writes it), `brig wait` raises `TRUST_PROMPT <wid>` with the folder and options, and `brig check` shows it. `brig trust <wid>` reads which option has the cursor, moves to "Yes, I trust this folder" and presses Enter, and presses nothing if it can't tell (`TRUST_UNREADABLE`). The brigadier accepts only for the run's own repo, or a worktree or subfolder of it.
+- `brig runs` shows each run's repo and the first line of its goal; `--here` lists this repo's runs only and `--overlap` names other runs on the same repo that were active during this one (REPORT.md mentions them under Problems).
 
 ### Changed
 - **Codex workers now run in Codex's `workspace-write` sandbox by default** (network on; the repo, its real git dirs and the worker's control dir writable, so commits work in worktrees too). Set `BRIG_CODEX_SANDBOX=bypass` for the old unsandboxed behaviour. `BRIG_PERMISSION_MODE` now applies to Claude workers only.
 - Codex workers accept queued messages only with their per-worker token, strip control characters, cap them at 8 KB and frame them as the brigadier's message.
 - README: install is two steps (install the skill, then `/brigadier setup`).
+- A bare `/brigadier resume` resumes the only unfinished run of this repo if it has a goal; otherwise it lists the runs and asks which one. `resume <run-id>` and rebirth never ask.
+- A model named in the goal without a role applies to every worker of the run, verifiers included; a model named for a role applies to that role only. A run-level model keeps Codex workers out unless the goal names Codex.
+- A run's `config.env` may tighten `BRIG_MAX_EFFORT` and `BRIG_ALLOWED_MODELS` but no longer loosen them; `brig config` shows what it ignored.
+- The reborn brigadier follows `BRIG_PERMISSION_MODE`, like workers, and the user's own default model rather than the run's. Doctor and the Guardrails say so.
+- `/brigadier` starts with `brig init` in a Bash call of its own and reads CLAUDE.md, AGENTS.md and project memory with the Read tool, so a missing file is no error.
+- Doctor for openwong2kim/wmux says it was tested on a real PC with 4.3.0 (source read at 4.5.0).
 
 ### Fixed
 - Windows (Git Bash):
@@ -30,6 +39,10 @@ All notable changes to this project are documented here. The format follows
   - `send --file` and `rebirth` accept a `C:/…` path; Codex workers and the rebirth closer find a jq that winget installed as `jq-*.exe`.
   - doctor fails with the upgrade command when jq is too old for `-b`.
   - Paths with curly apostrophes (’) are quoted safely for PowerShell.
+- `/brigadier setup` writes config.env with one preamble instead of two.
+- A worker's settings.json `effortLevel` is the effort it starts with (`--effort`), not always `BRIG_DEFAULT_EFFORT`.
+- `brig status` shows `-` for a Codex worker's 5-hour window instead of `0%`.
+- Doctor finds openwong2kim/wmux's version from its pipe, or else from its newest `%LOCALAPPDATA%\wmux\app-X.Y.Z` folder, since its CLI has no `--version`.
 
 ## [0.1.0] - 2026-10-14
 
