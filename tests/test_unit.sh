@@ -348,6 +348,7 @@ BRIG_REBIRTH_TIMEOUT=20 brig rebirth >/dev/null 2>&1
 B="$(cat "$R/rebirth.sh")"
 expect_has "rebirth.sh keeps MSYS off the slash command" "$B" "export MSYS2_ARG_CONV_EXCL=/brigadier-skill:brigadier"
 expect_has "and still passes it to claude" "$B" "/brigadier-skill:brigadier\\ resume\\ $RID"
+check "the old tab closes after the ack" wait_for 10 grep -q "close-surface --force --surface $CMUX_SURFACE_ID" "$FAKE_TERM_DIR/log"
 brig kill successor >/dev/null 2>&1
 # One codex-worker turn under Git Bash (.state isn't live, so it stops after the kickoff).
 cw="$T_ROOT/cw-win"; mkdir -p "$cw"; : >"$FAKE_LOG"
