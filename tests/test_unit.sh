@@ -146,6 +146,35 @@ expect_has "Enter reaches an open dialog too" "$(cat "$FAKE_TERM_DIR/log")" "cmu
 brig kill w01 >/dev/null; brig finish "done" >/dev/null
 unset BRIG_RUN
 
+echo "== wmux: quoting, input and rebirth"
+new_env wmux
+export BRIG_HOME="$E_DIR/it's here/brigadier"; mkdir -p "$BRIG_HOME/fake-modes"
+RID="$(run_id_of "$(brig init wq)")"; export BRIG_RUN="$RID"; R="$BRIG_HOME/runs/$RID"
+fake_mode w01 ask
+brig spawn w01 "$E_DIR/task.md" --title "it's · lead" >/dev/null
+out="$(brig wait 30)"; expect_has "a worker starts from a path with a quote and a space" "$out" "TURN_END w01 status=working"
+sid="$(surface_of w01)"
+L="$(cat "$FAKE_TERM_DIR/log")"
+expect_has "the tab runs Git Bash on the script, PowerShell-quoted" "$L" "--cmd & '$BASH' '$E_DIR/it''s here/brigadier/runs/$RID/workers/w01/launch.sh'"
+expect_has "then closes when the worker ends" "$L" "launch.sh'; exit"
+expect_has "the quote is doubled for PowerShell" "$(grep -F 'agent spawn' "$FAKE_TERM_DIR/log" | tail -1)" "it''s here"
+expect_has "the tab is opened in the run's workspace" "$L" "agent spawn --workspace ws-test --cwd $E_DIR/repo"
+expect_has "and named after the worker" "$L" "wmux rename-surface $sid ⚙ w01 · it's · lead"
+sleep 1; brig send w01 'use \n literally' >/dev/null
+expect_has "text goes in literally, as one argument" "$(cat "$FAKE_TERM_DIR/log")" "wmux send --surface $sid use \\n literally"
+out="$(brig wait 30)"; expect_has "and reaches the worker" "$out" "ack: use \\n literally"
+expect_has "screen reads come back as text" "$(brig screen w01 5)" "ack: use \\n literally"
+expect_has "status goes to the sidebar" "$(brig status >/dev/null; cat "$FAKE_TERM_DIR/log")" "wmux set-status --workspace ws-test --state running --text w01 idle"
+brig kill w01 >/dev/null
+fake_mode successor ack
+out="$(BRIG_REBIRTH_TIMEOUT=20 brig rebirth 2>&1)"
+expect_has "a wmux rebirth confirms" "$out" "REBIRTH_OK"
+check "and the old tab closes itself after the ack" wait_for 10 grep -q "wmux close-surface $WMUX_SURFACE_ID" "$FAKE_TERM_DIR/log"
+brig kill successor >/dev/null
+brig finish "done" >/dev/null
+expect_has "finish clears the sidebar status" "$(tail -3 "$FAKE_TERM_DIR/log")" "wmux set-status --workspace ws-test --state idle"
+unset BRIG_RUN
+
 echo "== resuming a finished background run"
 new_env tmux-bg
 RID="$(run_id_of "$(brig init again)")"; export BRIG_RUN="$RID"
@@ -253,6 +282,25 @@ out="$(PATH="$nb" brig init x 2>&1)"
 expect_has "init stops with the same message" "$out" "neither is available"
 out="$(BRIG_DEFAULT_EFFORT=max brig doctor 2>&1)"
 expect_has "doctor checks the effort settings" "$out" "BRIG_DEFAULT_EFFORT=max must be"
+new_env wmux
+out="$(brig doctor 2>&1)"; code=$?
+expect_has "doctor finds wmux inside a wmux tab" "$out" "ok    terminal: wmux (tab surf-self-"
+check "and passes" test "$code" -eq 0
+# Windows without tmux, cmux or wmux on PATH.
+new_env tmux-bg
+wb="$T_ROOT/winbin"; mkdir -p "$wb"
+for c in bash jq git grep cut head tail mkdir sed tr date cat dirname basename find sort awk env stat ls rm mv ln wc mktemp; do
+  p="$(command -v "$c")" && ln -sf "$p" "$wb/$c"
+done
+ln -sf "$TESTS_DIR/fakes/bin/claude" "$wb/claude"; ln -sf "$TESTS_DIR/fakes/win/uname" "$wb/uname"; ln -sf "$TESTS_DIR/fakes/win/cygpath" "$wb/cygpath"
+out="$(PATH="$wb" brig doctor 2>&1)"
+expect_has "on Windows outside wmux, doctor says to use wmux" "$out" "FAIL  no terminal backend: On Windows, Brigadier runs its workers in wmux"
+expect_has "with where to get it" "$out" "https://github.com/amirlehmam/wmux/releases/latest"
+expect_not "and no tmux advice" "$out" "install tmux"
+out="$(PATH="$wb" WMUX_PTY_ID=pty-1 TERM_PROGRAM=wmux brig doctor 2>&1)"
+expect_has "the other wmux is named as unsupported" "$out" "openwong2kim/wmux, which Brigadier doesn't support"
+out="$(PATH="$wb" WMUX_SURFACE_ID=surf-1 brig init x 2>&1)"
+expect_has "a wmux tab without the CLI is explained" "$out" "the 'wmux' command isn't on PATH"
 
 echo "== installed copy without exec bits"
 new_env cmux

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The full worker lifecycle against every terminal backend, through brig's backend interface.
-# usage: bash tests/test_backends.sh [cmux] [tmux-bg] [tmux-attached]   (default: all three)
+# usage: bash tests/test_backends.sh [cmux] [wmux] [tmux-bg] [tmux-attached]   (default: all four)
 # shellcheck source=tests/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
@@ -17,6 +17,10 @@ lifecycle() {
   local R="$BRIG_HOME/runs/$RID"
   case "$kind" in
     cmux) expect_has "run.env records cmux" "$(cat "$R/run.env")" "BACKEND=cmux" ;;
+    wmux)
+      expect_has "run.env records wmux" "$(cat "$R/run.env")" "BACKEND=wmux"
+      expect_has "run.env records the workspace from whoami" "$(cat "$R/run.env")" "WORKSPACE=ws-test"
+      expect_has "and the Git Bash to start workers with" "$(cat "$R/run.env")" "WMUX_BASH=" ;;
     tmux-bg)
       expect_has "run.env records background tmux" "$(cat "$R/run.env")" "MODE=background"
       expect_has "init tells how to watch" "$out" "tmux attach -t brigadier-demo"
@@ -82,6 +86,6 @@ lifecycle() {
   unset BRIG_RUN
 }
 
-kinds=("$@"); (( ${#kinds[@]} )) || kinds=(cmux tmux-bg tmux-attached)
+kinds=("$@"); (( ${#kinds[@]} )) || kinds=(cmux wmux tmux-bg tmux-attached)
 for k in "${kinds[@]}"; do lifecycle "$k"; done
 summary

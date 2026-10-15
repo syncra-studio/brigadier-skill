@@ -45,12 +45,13 @@ wait_for() {
 }
 
 # A clean environment for one scenario: own state dir, own repo, fakes on PATH.
-# new_env <backend: cmux|tmux-bg|tmux-attached|tmux-real-bg|tmux-real-attached>
+# new_env <backend: cmux|wmux|tmux-bg|tmux-attached|tmux-real-bg|tmux-real-attached>
 new_env() {
   local kind="$1"
   E_DIR="$T_ROOT/env$((++ENV_N))"
   mkdir -p "$E_DIR/home" "$E_DIR/repo"
   unset CMUX_WORKSPACE_ID CMUX_SURFACE_ID TMUX TMUX_PANE CLAUDE_CODE_SESSION_ID BRIGADIER_SESSION
+  unset WMUX WMUX_SURFACE_ID WMUX_PIPE WMUX_PTY_ID CLAUDE_CODE_GIT_BASH_PATH
   unset BRIG_RUN BRIG_WORKER BRIG_WORKER_DIR CLAUDECODE
   local k; for k in $(env | sed -n 's/^\(BRIG_[A-Z_]*\)=.*/\1/p'); do unset "$k"; done
   export CLAUDE_CONFIG_DIR="$E_DIR/home"
@@ -61,6 +62,8 @@ new_env() {
   case "$kind" in
     cmux) export PATH="$TESTS_DIR/fakes/term:$TESTS_DIR/fakes/bin:$BASE_PATH"
           export CMUX_WORKSPACE_ID="ws-test" CMUX_SURFACE_ID="self-$ENV_N" ;;
+    wmux) export PATH="$TESTS_DIR/fakes/term:$TESTS_DIR/fakes/bin:$BASE_PATH"
+          export WMUX=1 WMUX_SURFACE_ID="surf-self-$ENV_N" ;;
     tmux-bg) export PATH="$TESTS_DIR/fakes/term:$TESTS_DIR/fakes/bin:$BASE_PATH" ;;
     tmux-attached) export PATH="$TESTS_DIR/fakes/term:$TESTS_DIR/fakes/bin:$BASE_PATH"
           export TMUX="/tmp/$T_PREFIX-fake-sock,999,0" TMUX_PANE="%9$ENV_N" ;;

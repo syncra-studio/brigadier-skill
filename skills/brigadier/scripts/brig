@@ -186,13 +186,27 @@ pick_backend() {
   case "$BRIG_BACKEND" in
     auto)
       if [[ -n "${CMUX_WORKSPACE_ID:-}" ]] && command -v cmux >/dev/null 2>&1; then echo cmux
+      elif [[ -n "${WMUX_SURFACE_ID:-}" ]] && command -v wmux >/dev/null 2>&1; then echo wmux
       elif command -v tmux >/dev/null 2>&1; then echo tmux
       else return 1; fi ;;
     *) echo "$BRIG_BACKEND" ;;
   esac
 }
+WMUX_RELEASES="https://github.com/amirlehmam/wmux/releases/latest"
+WMUX_TESTED="2.24.0"
 no_terminal_msg() {
-  echo "Brigadier needs cmux or tmux to run workers, and neither is available. $(install_hint tmux) — then run /brigadier again from any terminal; it starts tmux in the background for you."
+  if ! is_windows; then
+    echo "Brigadier needs cmux or tmux to run workers, and neither is available. $(install_hint tmux) — then run /brigadier again from any terminal; it starts tmux in the background for you."
+  elif [[ -n "${WMUX_PTY_ID:-}" && -z "${WMUX_SURFACE_ID:-}" ]]; then
+    echo "This terminal is openwong2kim/wmux, which Brigadier doesn't support (its CLI can't start a command in a new tab or list every tab). Install amirlehmam/wmux instead: $(wmux_install_steps)"
+  elif [[ -n "${WMUX_SURFACE_ID:-}" ]]; then
+    echo "This is a wmux tab, but the 'wmux' command isn't on PATH. Close this tab, open a new one in wmux and start Claude Code there."
+  else
+    echo "On Windows, Brigadier runs its workers in wmux (tabs, like cmux on macOS), and this isn't a wmux tab. $(wmux_install_steps)"
+  fi
+}
+wmux_install_steps() {
+  echo "If wmux isn't installed: download wmux-<version>-setup.exe from $WMUX_RELEASES (tested with $WMUX_TESTED) and run it. Then open wmux, start Claude Code in a wmux tab, and run /brigadier setup there."
 }
 
 # ---- runs -----------------------------------------------------------------------
@@ -203,6 +217,7 @@ no_terminal_msg() {
 #   4. the only unfinished run          - refused when several runs are unfinished
 identity() {
   if [[ -n "${CMUX_SURFACE_ID:-}" ]]; then echo "cmux-$CMUX_SURFACE_ID"
+  elif [[ -n "${WMUX_SURFACE_ID:-}" ]]; then echo "wmux-$WMUX_SURFACE_ID"
   elif [[ -n "${TMUX:-}" && -n "${TMUX_PANE:-}" ]]; then echo "tmux-$(cut -d, -f2 <<<"$TMUX")-${TMUX_PANE#%}"
   elif [[ -n "${CLAUDE_CODE_SESSION_ID:-}" ]]; then echo "claude-$CLAUDE_CODE_SESSION_ID"
   fi
@@ -584,9 +599,12 @@ cmd_rebirth() {
   log_event "rebirth confirmed by $sid"
   if [[ -n "$self" ]]; then
     echo "REBIRTH_OK: the new brigadier confirmed. Closing this tab in 5s."
-    local closer; closer="$(declare -f tm be_close 2>/dev/null || true)"
-    nohup bash -c "$closer
-      TMUX_SOCKET=$(q "${TMUX_SOCKET:-}") TMUX_SOCKET_PATH=$(q "${TMUX_SOCKET_PATH:-}")
+    # The closer outlives this process: it loads the run's backend itself, with the helpers backends use.
+    local helpers; helpers="$(declare -f die q is_windows native_path posix_path jq 2>/dev/null || true)"
+    nohup bash -c "$helpers
+      IS_WINDOWS=$(q "$IS_WINDOWS")
+      source $(q "$RUN/run.env")
+      source $(q "$SKILL_DIR/scripts/backends/$BACKEND.sh")
       sleep 5; be_close $(q "$self")" >/dev/null 2>&1 &
     disown || true
   else
@@ -838,6 +856,9 @@ cmd_doctor() {
     if [[ "$b" == cmux ]]; then
       if [[ -n "${CMUX_WORKSPACE_ID:-}" ]] && command -v cmux >/dev/null 2>&1; then ok "terminal: cmux (workspace $CMUX_WORKSPACE_ID)"
       else no "BRIG_BACKEND=cmux but this isn't a cmux terminal (or cmux isn't on PATH)"; fi
+    elif [[ "$b" == wmux ]]; then
+      if [[ -n "${WMUX_SURFACE_ID:-}" ]] && command -v wmux >/dev/null 2>&1; then ok "terminal: wmux (tab $WMUX_SURFACE_ID; Brigadier is tested with wmux $WMUX_TESTED)"
+      else no "BRIG_BACKEND=wmux, but this isn't a wmux tab with the wmux CLI on PATH. $(wmux_install_steps)"; fi
     elif [[ "$b" == tmux ]]; then
       if ! command -v tmux >/dev/null 2>&1; then no "tmux not found. $(install_hint tmux)"
       elif [[ -n "${TMUX:-}" && "$BRIG_TMUX_MODE" != background ]]; then ok "terminal: tmux $(tmux -V | cut -d' ' -f2), attached (workers open as windows in this session)"

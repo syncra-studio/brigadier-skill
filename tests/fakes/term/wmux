@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# Fake wmux (amirlehmam/wmux CLI) for the test suite: the commands brig's wmux backend uses.
+# shellcheck source=tests/fakes/term/faketerm.sh
+source "$(dirname "${BASH_SOURCE[0]}")/faketerm.sh"
+ft_log "wmux $*"
+
+sub="${1:-}"; shift || true
+opt() { # opt <name> <args...>: value after --name
+  local name="$1"; shift
+  while (( $# )); do [[ "$1" == "--$name" ]] && { echo "$2"; return; }; shift; done
+}
+WS="ws-test"
+
+case "$sub" in
+  whoami) jq -cn --arg w "$WS" --arg s "${WMUX_SURFACE_ID:-}" '{id: $w, title: "test", surfaceId: $s}' ;;
+  list-workspaces) jq -cn --arg w "$WS" '{workspaces: [{id: $w, isActive: true}, {id: "ws-empty", isActive: false}]}' ;;
+  list-surfaces)
+    ws="$(opt workspace "$@")"
+    for id in $(ft_group_ids "$ws"); do if ft_alive "$id"; then echo "$id"; fi; done \
+      | jq -R '{id: ., type: "terminal"}' | jq -sc '{surfaces: .}' ;;
+  agent)
+    [[ "${1:-}" == spawn ]] || { echo "fake wmux: unsupported agent ${1:-}" >&2; exit 2; }
+    shift; cmd="$(opt cmd "$@")"
+    # The backend hands PowerShell: & '<bash.exe>' '<script>'; exit
+    re="^& '(([^']|'')*)' '(([^']|'')*)'; exit$"
+    [[ "$cmd" =~ $re ]] || { echo "fake wmux: unexpected --cmd: $cmd" >&2; exit 2; }
+    sq="'"; exe="${BASH_REMATCH[1]//$sq$sq/$sq}"; script="${BASH_REMATCH[3]//$sq$sq/$sq}"
+    [[ -f "$exe" ]] || { echo "fake wmux: no such shell: $exe" >&2; exit 2; }
+    cwd="$(opt cwd "$@")"; [[ "$cwd" != /* ]] && [[ "$cwd" != [A-Za-z]:* ]] && { echo "fake wmux: relative cwd $cwd" >&2; exit 2; }
+    n="$(ft_next)"; id="$(printf 'surf-%08x-0000-4000-8000-%012x' "$n" "$n")"
+    ft_spawn "$id" "$cwd" "$(printf '%q %q' "$exe" "$script")" "$(opt workspace "$@")"
+    jq -cn --arg s "$id" --arg a "agent-$n" '{agentId: $a, surfaceId: $s}' ;;
+  send)
+    sid="$(opt surface "$@")"; text=""
+    while (( $# )); do if [[ "$1" == --surface ]]; then shift 2; else text="${text:+$text }$1"; shift; fi; done
+    ft_type "$sid" "$text" && echo '{"ok":true}' ;;
+  send-key) ft_enter "$(opt surface "$@")" && echo '{"ok":true}' ;;
+  read-screen)
+    ft_read "$(opt surface "$@")" "$(opt lines "$@")" | jq -Rs --arg s "$(opt surface "$@")" '{text: ., surfaceId: $s}' ;;
+  close-surface) ft_close "${1:-}"; echo '{"ok":true}' ;;
+  rename-surface|set-status) echo '{"ok":true}' ;;
+  notify) echo "Notification sent" ;;
+  *) echo "fake wmux: unsupported command '$sub'" >&2; exit 2 ;;
+esac
