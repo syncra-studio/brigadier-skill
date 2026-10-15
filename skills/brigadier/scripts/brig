@@ -304,7 +304,8 @@ wmux_flavor() {
 }
 WMUX_RELEASES="https://github.com/amirlehmam/wmux/releases/latest"
 WMUX_TESTED="2.24.0"
-WMUX_OW_TESTED="4.5.0"
+WMUX_OW_TESTED="4.3.0"   # on a real Windows PC
+WMUX_OW_READ="4.5.0"     # the source the backend was written against
 WMUX_OW_WINGET="winget install --id openwong2kim.wmux -e --source winget"
 no_terminal_msg() {
   if ! is_windows; then
@@ -320,6 +321,12 @@ no_terminal_msg() {
 wmux_install_steps() {
   echo "Recommended: amirlehmam/wmux. Download wmux-<version>-setup.exe from $WMUX_RELEASES (tested with $WMUX_TESTED) and run it. Alternative: openwong2kim/wmux, with: $WMUX_OW_WINGET. Then open wmux, start Claude Code in a wmux tab, and run /brigadier setup there."
 }
+# The newest openwong2kim/wmux installed under %LOCALAPPDATA%\wmux (app-X.Y.Z folders), or nothing.
+wmux_ow_installed() {
+  local la="${LOCALAPPDATA:-}"; [[ -n "$la" ]] || return 0
+  la="$(posix_path "$la")"
+  find "$la/wmux" -maxdepth 1 -type d -name 'app-*' 2>/dev/null | sed 's|.*/app-||' | sort -t. -k1,1n -k2,2n -k3,3n | tail -1
+}
 # One line on the wmux in use, for doctor: which project, its version, and what it can't do.
 wmux_doctor_line() {
   local v
@@ -329,8 +336,13 @@ wmux_doctor_line() {
       echo "terminal: wmux (amirlehmam/wmux ${v:-version unknown}, tab $WMUX_SURFACE_ID; tested with $WMUX_TESTED)" ;;
     wmux-ow)
       load_backend wmux-ow
+      # Its CLI has no version command; the running app tells its version over the pipe, and the
+      # installer (Squirrel) keeps each version in %LOCALAPPDATA%\wmux\app-X.Y.Z.
       v="$(ow_rpc system.identify '{}' 2>/dev/null | jq -r '.version // empty' 2>/dev/null || true)"
-      echo "terminal: wmux-ow (openwong2kim/wmux ${v:-version unknown: its pipe did not answer}, pane $WMUX_PTY_ID; tested with $WMUX_OW_TESTED). The fallback: tabs keep wmux's own titles, the sidebar status may not clear, and only tabs in this workspace are tracked" ;;
+      if [[ -z "$v" ]]; then
+        v="$(wmux_ow_installed)"; v="${v:+$v (from its install folder; its pipe did not answer)}"
+      fi
+      echo "terminal: wmux-ow (openwong2kim/wmux ${v:-version unknown: its pipe did not answer}, pane $WMUX_PTY_ID; tested on a real PC with $WMUX_OW_TESTED, source read at $WMUX_OW_READ). The fallback: tabs keep wmux's own titles, the sidebar status may not clear, and only tabs in this workspace are tracked" ;;
   esac
 }
 
@@ -406,6 +418,8 @@ ctx_tokens() { sl "$1" '((.context_window.used_percentage // 0) * (.context_wind
 rate_pct() { sl "$1" '(.rate_limits.five_hour.used_percentage // 0) | floor'; }
 rate_reset() { sl "$1" '.rate_limits.five_hour.resets_at // 0'; }
 ctx_label() { if [[ "$(agent_of "$1")" == codex ]]; then echo "-"; else echo "$(ctx_pct "$1")%"; fi; }
+# Codex reports no 5-hour window.
+rate_label() { if [[ "$(agent_of "$1")" == codex ]]; then echo "-"; else echo "$(rate_pct "$1")%"; fi; }
 busy() { (( $(mtime "$1/prompt.ts") > $(mtime "$1/stop.json") )); }
 # What a Claude worker's screen says it is doing: trust | interrupted | working | background | idle | unknown.
 # A turn cut off by Esc or a restart fires no Stop hook, so `busy` stays true; only the screen shows it.
@@ -437,10 +451,12 @@ clean_env_lines() {
   echo 'unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_SESSION_ID CLAUDE_CODE_SSE_PORT BRIG_WORKER BRIG_WORKER_DIR'
   if [[ -n "$BRIG_CLAUDE_CONFIG_DIR" ]]; then echo "export CLAUDE_CONFIG_DIR=$(q "$BRIG_CLAUDE_CONFIG_DIR")"; fi
 }
+# claude_settings_json <hook-command> <worker-dir> <effort>: effortLevel is the --effort the worker
+# starts with, so the two never disagree.
 claude_settings_json() {
-  local hook="$1" d="$2" skip=false
+  local hook="$1" d="$2" eff="$3" skip=false
   [[ "$BRIG_PERMISSION_MODE" == bypassPermissions ]] && skip=true
-  jq -n --arg h "$hook" --arg d "$(q "$d")" --argjson allowed "$(allowed_json)" --arg eff "$BRIG_DEFAULT_EFFORT" --argjson skip "$skip" '{
+  jq -n --arg h "$hook" --arg d "$(q "$d")" --argjson allowed "$(allowed_json)" --arg eff "$eff" --argjson skip "$skip" '{
     effortLevel: $eff,
     skipDangerousModePermissionPrompt: $skip,
     statusLine: {type: "command", command: "\($h) statusline \($d)"},
@@ -711,7 +727,7 @@ cmd_spawn() {
     win_launch_lines
     echo "export BRIG_WORKER=$(q "$wid") BRIG_WORKER_DIR=$(q "$d") BRIG_RUN=$(q "$RUN") BRIG_SKILL_DIR=$(q "$SKILL_DIR")"
     if [[ "$agent" == claude ]]; then
-      claude_settings_json "$(bash_cmd) $(q "$BRIG_SCRIPT") _hook" "$d" >"$d/settings.json"
+      claude_settings_json "$(bash_cmd) $(q "$BRIG_SCRIPT") _hook" "$d" "$effort" >"$d/settings.json"
       printf 'exec claude --permission-mode %s --disallowedTools AskUserQuestion EnterPlanMode ExitPlanMode' "$(q "$BRIG_PERMISSION_MODE")"
       printf ' --settings %s --name %s --model %s --effort %s' "$(q "$(native_path "$d/settings.json")")" "$(q "$wid${title:+ · $title}")" "$(q "$model")" "$(q "$effort")"
       printf ' %s\n' "$(q "$kickoff")"
@@ -954,7 +970,7 @@ cmd_status() {
   for w in $(workers); do
     d="$RUN/workers/$w"
     st="$(readf "$d/.state" '?')"; b="idle"; busy "$d" && b="busy"; [[ "$st" == closed ]] && b="-"
-    printf '%-5s %-7s %-9s %-5s %-6s %-5s %-28s %s\n' "$w" "$st" "$(readf "$d/status" '-')" "$(ctx_label "$d")" "$b" "$(rate_pct "$d")%" "$(readf "$d/model")" "$(readf "$d/title")"
+    printf '%-5s %-7s %-9s %-5s %-6s %-5s %-28s %s\n' "$w" "$st" "$(readf "$d/status" '-')" "$(ctx_label "$d")" "$b" "$(rate_label "$d")" "$(readf "$d/model")" "$(readf "$d/title")"
     [[ "$st" == live ]] && summary+="$w $b ctx$(ctx_label "$d") · "
   done
   be_status "${summary% · }"
@@ -1307,9 +1323,10 @@ cmd_setup() {
         && item fixed "config $USER_CONFIG had Windows line endings (original kept as config.env.bak)"
     else item ok "config $USER_CONFIG (left as it is)"; fi
   elif [[ -d "$BRIG_HOME" ]]; then
-    { echo "# Created by 'brig setup'. Every setting is commented out, so the defaults apply and follow"
-      echo "# new releases. Uncomment a line to change it."
-      sed -E 's/^([A-Z_]+=)/# \1/' "$SKILL_DIR/config.example.env"; } >"$USER_CONFIG" \
+    # One preamble: setup's own, in place of the template's lines about being copied.
+    { echo "# Brigadier settings, created by 'brig setup'. Every setting is commented out, so the defaults"
+      echo "# apply and follow new releases. Uncomment a line to change it."
+      sed -E '/^# Brigadier settings\./,/uncomment what you want to change\./d; s/^([A-Z_]+=)/# \1/' "$SKILL_DIR/config.example.env"; } >"$USER_CONFIG" \
       && item created "config $USER_CONFIG (all settings commented out; defaults apply)"
   fi
   local f n=0

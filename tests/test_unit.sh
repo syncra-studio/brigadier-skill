@@ -27,6 +27,7 @@ out="$(brig spawn w01 "$E_DIR/task.md" --effort extreme 2>&1)"
 expect_has "refuses an unknown effort" "$out" "unknown effort 'extreme'"
 out="$(BRIG_ALLOWED_MODELS="opus sonnet" brig spawn w01 "$E_DIR/task.md" --model sonnet --effort medium 2>&1)"
 expect_has "spawns an allowed model" "$out" "spawned w01 [claude sonnet effort=medium]"
+expect_has "settings carry the effort it starts with" "$(jq -r .effortLevel "$R/workers/w01/settings.json")" "medium"
 expect_has "worker settings carry the allowlist" "$(jq -c .availableModels "$R/workers/w01/settings.json")" '["opus","sonnet"]'
 expect_has "protocol names the allowed models" "$(cat "$R/workers/w01/task.md")" "only these models: opus sonnet"
 out="$(BRIG_MAX_EFFORT=max brig spawn w02 "$E_DIR/task.md" --effort max 2>&1)"
@@ -250,7 +251,23 @@ new_env wmux-ow
 out="$(brig doctor 2>&1)"; code=$?
 expect_has "doctor names openwong2kim/wmux and its version" "$out" "ok    terminal: wmux-ow (openwong2kim/wmux 4.5.0-fake, pane opty-self-"
 expect_has "and what the fallback can't do" "$out" "tabs keep wmux's own titles"
+expect_has "and what it was tested with" "$out" "tested on a real PC with 4.3.0, source read at 4.5.0"
 check "and passes" test "$code" -eq 0
+export LOCALAPPDATA="$E_DIR/localappdata"; mkdir -p "$LOCALAPPDATA/wmux/app-4.2.9" "$LOCALAPPDATA/wmux/app-4.10.0" "$LOCALAPPDATA/wmux/app-4.3.0"
+mv "$USERPROFILE/.wmux-auth-token" "$E_DIR/token.away"
+expect_has "with no answer from the pipe, the version comes from the install folder" "$(brig doctor 2>&1)" "openwong2kim/wmux 4.10.0 (from its install folder; its pipe did not answer)"
+mv "$E_DIR/token.away" "$USERPROFILE/.wmux-auth-token"; unset LOCALAPPDATA
+# Exactly what openwong2kim/wmux 4.3.0 set on the user's PC: no WMUX_SURFACE_ID, no WMUX.
+(
+  unset WMUX WMUX_SURFACE_ID WMUX_CLI WMUX_PIPE
+  export WMUX_PTY_ID=daemon-97095f5f TERM_PROGRAM=wmux WMUX_WORKSPACE_ID=ws-test
+  expect_has "the env on the user's PC means openwong2kim/wmux" "$(brig doctor 2>&1)" "ok    terminal: wmux-ow (openwong2kim/wmux 4.5.0-fake, pane daemon-97095f5f"
+  out="$(brig init pcenv 2>&1)"
+  expect_has "and a run uses wmux-ow" "$out" "backend: wmux-ow"
+  check "bound to that pane" test -f "$BRIG_HOME/bindings/wmuxow-daemon-97095f5f"
+  summary >/dev/null; echo "$PASS $FAIL" >"$E_DIR/sub.count"
+)
+read -r PASS FAIL <"$E_DIR/sub.count"
 out="$(BRIG_BACKEND=wmux brig doctor 2>&1)"
 expect_has "BRIG_BACKEND=wmux inside openwong2kim is refused" "$out" "BRIG_BACKEND=wmux (amirlehmam/wmux), but this isn't one of its tabs"
 new_env wmux
@@ -278,6 +295,7 @@ RID="$(run_id_of "$(brig init cx)")"; export BRIG_RUN="$RID"; R="$BRIG_HOME/runs
 out="$(brig spawn c01 "$E_DIR/task.md" --agent codex 2>&1)"
 expect_has "codex worker spawns" "$out" "spawned c01 [codex effort=high]"
 out="$(brig wait 30)"; expect_has "codex worker finishes" "$out" "TURN_END c01 status=done"
+expect_has "status shows no 5-hour window for Codex" "$(brig status)" "c01   live    done      -     idle   -     codex"
 sleep 1; brig send c01 "one more thing" >/dev/null
 check "the token is private to the user" bash -c "[[ \$(ls -l '$R/workers/c01/.inbox_token' | cut -c1-10) == -rw------- ]]"
 out="$(brig wait 30)"; expect_has "queued message becomes a resumed turn" "$out" "one more thing"

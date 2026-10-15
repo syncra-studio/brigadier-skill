@@ -43,6 +43,8 @@ expect_has "runs doctor last" "$(tail -3 <<<"$out")" "fix the FAIL lines first"
 check "and exits with doctor's failure" test "$code" -ne 0
 expect_has "creates the user config" "$out" "created  config $BRIG_HOME/config.env"
 check "with every setting commented out" bash -c "! grep -Eq '^BRIG_' '$BRIG_HOME/config.env' && grep -q '^# BRIG_DEFAULT_MODEL=opus' '$BRIG_HOME/config.env'"
+check "with one preamble" test "$(grep -c "Uncomment a line\|uncomment what you want" "$BRIG_HOME/config.env")" -eq 1
+expect_has "setup's own" "$(head -2 "$BRIG_HOME/config.env")" "# Brigadier settings, created by 'brig setup'."
 expect_has "so the defaults apply" "$(brig config)" "BRIG_DEFAULT_MODEL     opus                     default"
 out="$(brig setup --install </dev/null 2>&1)"
 expect_has "--install without a terminal asks for --yes" "$out" "Not installing: there's no terminal to confirm in"
