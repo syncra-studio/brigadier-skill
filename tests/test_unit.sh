@@ -110,6 +110,14 @@ expect_has "background rebirth confirms" "$out" "REBIRTH_OK"
 expect_has "and tells the user where it went" "$out" "tmux attach -t brigadier-bgreborn"
 brig kill successor >/dev/null; brig finish "done" >/dev/null
 unset BRIG_RUN CLAUDE_CODE_SESSION_ID
+new_env tmux-attached
+RID="$(run_id_of "$(brig init attreborn)")"; export BRIG_RUN="$RID"
+fake_mode successor ack
+out="$(BRIG_REBIRTH_TIMEOUT=20 brig rebirth 2>&1)"
+expect_has "attached tmux rebirth confirms" "$out" "REBIRTH_OK: the new brigadier confirmed. Closing this tab in 5s."
+check "and the old pane closes itself, on the run's tmux server" wait_for 10 grep -qF "tmux -S /tmp/$T_PREFIX-fake-sock kill-pane -t $TMUX_PANE" "$FAKE_TERM_DIR/log"
+brig kill successor >/dev/null; brig finish "done" >/dev/null
+unset BRIG_RUN
 
 echo "== reviews"
 new_env cmux
