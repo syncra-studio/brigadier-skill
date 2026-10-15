@@ -87,7 +87,7 @@ esac
 # Precedence: environment > <run>/config.env > ~/.claude/brigadier/config.env > defaults.
 BRIG_KEYS="BRIG_BACKEND BRIG_DEFAULT_MODEL BRIG_CHORE_MODEL BRIG_ALLOWED_MODELS BRIG_DEFAULT_EFFORT BRIG_MAX_EFFORT
 BRIG_MAX_WORKERS BRIG_CTX_PCT BRIG_CTX_TOKENS BRIG_SELF_TOKENS BRIG_STALL_MIN BRIG_IDLE_SEC BRIG_RATE_PCT BRIG_POLL
-BRIG_CODEX BRIG_REVIEWER BRIG_PERMISSION_MODE BRIG_CLAUDE_CONFIG_DIR BRIG_REBIRTH_TIMEOUT BRIG_TMUX_SOCKET BRIG_TMUX_MODE"
+BRIG_CODEX BRIG_CODEX_SANDBOX BRIG_REVIEWER BRIG_PERMISSION_MODE BRIG_CLAUDE_CONFIG_DIR BRIG_REBIRTH_TIMEOUT BRIG_TMUX_SOCKET BRIG_TMUX_MODE"
 ENV_SET=" "
 for _k in $BRIG_KEYS; do
   if [[ -n "${!_k+x}" ]]; then ENV_SET+="$_k "; eval "ENV_$_k=\${$_k}"; fi
@@ -104,7 +104,7 @@ load_config() {
   : "${BRIG_DEFAULT_EFFORT:=high}" "${BRIG_MAX_EFFORT:=high}" "${BRIG_MAX_WORKERS:=3}"
   : "${BRIG_CTX_PCT:=70}" "${BRIG_CTX_TOKENS:=300000}" "${BRIG_SELF_TOKENS:=150000}"
   : "${BRIG_STALL_MIN:=30}" "${BRIG_IDLE_SEC:=120}" "${BRIG_RATE_PCT:=95}" "${BRIG_POLL:=15}"
-  : "${BRIG_CODEX:=auto}" "${BRIG_REVIEWER:=auto}" "${BRIG_PERMISSION_MODE:=bypassPermissions}"
+  : "${BRIG_CODEX:=auto}" "${BRIG_CODEX_SANDBOX:=workspace-write}" "${BRIG_REVIEWER:=auto}" "${BRIG_PERMISSION_MODE:=bypassPermissions}"
   : "${BRIG_CLAUDE_CONFIG_DIR:=}" "${BRIG_REBIRTH_TIMEOUT:=900}" "${BRIG_TMUX_SOCKET:=}" "${BRIG_TMUX_MODE:=auto}"
 }
 load_config
@@ -134,7 +134,19 @@ check_permission_mode() {
     bypassPermissions|acceptEdits|auto|dontAsk|manual) ;;
     *) die "BRIG_PERMISSION_MODE '$BRIG_PERMISSION_MODE' must be bypassPermissions, acceptEdits, auto, dontAsk or manual" ;;
   esac
+  case "$BRIG_CODEX_SANDBOX" in
+    workspace-write|bypass) ;;
+    *) die "BRIG_CODEX_SANDBOX '$BRIG_CODEX_SANDBOX' must be workspace-write or bypass" ;;
+  esac
 }
+# One line on how workers are allowed to act, for doctor (and so setup).
+posture() {
+  local cx="Codex sandboxed (workspace-write: the repo, its git dirs and the worker's own dir; network on)"
+  [[ "$BRIG_CODEX_SANDBOX" == bypass ]] && cx="Codex unsandboxed (BRIG_CODEX_SANDBOX=bypass)"
+  echo "workers: Claude $BRIG_PERMISSION_MODE · $cx. Change with BRIG_PERMISSION_MODE and BRIG_CODEX_SANDBOX in $USER_CONFIG"
+}
+# Longest message `brig send` types or queues; anything longer goes through a file (send --file).
+MSG_MAX=2000
 codex_on() {
   case "$BRIG_CODEX" in
     off) return 1 ;;
@@ -490,6 +502,11 @@ cmd_spawn() {
     cat "$taskf"
   } >"$d/task.md"
   echo "$agent" >"$d/agent"
+  # Codex workers accept queued messages only with this token, which only brig writes.
+  if [[ "$agent" == codex ]]; then
+    (umask 077; od -An -tx1 -N16 /dev/urandom | tr -d ' \n' >"$d/.inbox_token")
+    [[ -s "$d/.inbox_token" ]] || die "could not create the inbox token for $wid"
+  fi
   local kickoff; kickoff="Read $(native_path "$d/task.md") and follow it exactly. It holds your whole task and the protocol for this session."
 
   {
@@ -506,7 +523,7 @@ cmd_spawn() {
       printf ' --settings %s --name %s --model %s --effort %s' "$(q "$(native_path "$d/settings.json")")" "$(q "$wid${title:+ · $title}")" "$(q "$model")" "$(q "$effort")"
       printf ' %s\n' "$(q "$kickoff")"
     else
-      echo "exec bash $(q "$SKILL_DIR/scripts/codex-worker") $(q "$d") $(q "$REPO") $(q "$effort") $(q "$kickoff") $(q "$model") $(q "$BRIG_PERMISSION_MODE")"
+      echo "exec bash $(q "$SKILL_DIR/scripts/codex-worker") $(q "$d") $(q "$REPO") $(q "$effort") $(q "$kickoff") $(q "$model") $(q "$BRIG_CODEX_SANDBOX")"
     fi
   } >"$d/launch.sh"
   chmod +x "$d/launch.sh"
@@ -523,18 +540,32 @@ cmd_spawn() {
   be_watch_hint
 }
 
-# brig send <wid> <text...>   (single line; for long text write a file and send its path)
+# brig send <wid> <text...>      a short line, typed into Claude or queued for Codex
+# brig send <wid> --file <path>  anything longer: the worker is told to read the file
 cmd_send() {
-  local wid="${1:?usage: brig send <wid> <text>}"; shift
+  local wid="${1:?usage: brig send <wid> <text> | brig send <wid> --file <path>}"; shift
   open_run
   local d; d="$(wdir "$wid")"
-  local msg="$*"; msg="${msg//$'\n'/ }"
+  local msg
+  if [[ "${1:-}" == --file ]]; then
+    local f="${2:?usage: brig send <wid> --file <path>}"
+    [[ -f "$f" ]] || die "no such file: $f"
+    msg="Read $(native_path "$(abspath "$f")") and proceed. It is the brigadier's message to you."
+  else
+    msg="$*"; msg="${msg//$'\n'/ }"
+  fi
   [[ -n "$msg" ]] || die "empty message"
+  (( ${#msg} <= MSG_MAX )) || die "message is ${#msg} characters (limit $MSG_MAX). Write it to a file under $RUN/msgs/ and send it with: brig send $wid --file <path>"
   rm -f "$d/.stall_flag"
   if [[ "$(agent_of "$d")" == codex ]]; then
-    # The codex-worker loop picks this up as soon as the current turn finishes.
+    # The codex-worker loop picks this up as soon as the current turn finishes. The first line
+    # carries the worker's inbox token: codex-worker refuses files that lack it.
     local n; n=$(( $(readf "$d/inbox.seq" 0) + 1 )); echo "$n" >"$d/inbox.seq"
-    mkdir -p "$d/inbox"; printf '%s\n' "$msg" >"$d/inbox/$(printf '%08d' "$n").msg"
+    mkdir -p "$d/inbox"
+    # A worker spawned by an older brig has no token yet; codex-worker reads it per message.
+    [[ -s "$d/.inbox_token" ]] || (umask 077; od -An -tx1 -N16 /dev/urandom | tr -d ' \n' >"$d/.inbox_token")
+    printf 'brig-token: %s\n%s\n' "$(readf "$d/.inbox_token")" "$msg" >"$d/inbox/.$n.tmp" \
+      && mv -f "$d/inbox/.$n.tmp" "$d/inbox/$(printf '%08d' "$n").msg"
   else
     local sid; sid="$(readf "$d/surface")"
     now >"$d/prompt.ts"
@@ -741,6 +772,15 @@ cmd_wait() {
           events+=("RATE_LIMIT Claude 5h window at ${rp}%, resets $(hhmm "$rr") (epoch $rr)")
         fi
       fi
+      if [[ "$(agent_of "$d")" == codex ]]; then
+        local rl rs; rl=0; [[ -f "$d/inbox-rejected.log" ]] && rl="$(wc -l <"$d/inbox-rejected.log" | tr -d ' ')"; rs="$(readf "$d/.seen_rejected" 0)"
+        if (( rl > rs )); then
+          echo "$rl" >"$d/.seen_rejected"
+          local r; while IFS= read -r r; do
+            events+=("REJECTED $w: a queued message was refused ($(cut -d' ' -f3- <<<"$r")) and not delivered; resend it with brig send")
+          done < <(tail -n "$(( rl - rs ))" "$d/inbox-rejected.log")
+        fi
+      fi
       if busy "$d"; then
         local tm; tm="$(transcript_mtime "$d")"
         if [[ "$(agent_of "$d")" == claude ]] && (( $(now) - tm > BRIG_IDLE_SEC )) && [[ "$(readf "$d/.screen_flag")" != "$tm" ]]; then
@@ -920,7 +960,7 @@ cmd_doctor() {
   else ok "effort: default $BRIG_DEFAULT_EFFORT, max $BRIG_MAX_EFFORT"; fi
   if model_allowed "$BRIG_DEFAULT_MODEL"; then ok "models: default $BRIG_DEFAULT_MODEL, chores $BRIG_CHORE_MODEL, allowed: $BRIG_ALLOWED_MODELS"
   else no "BRIG_DEFAULT_MODEL=$BRIG_DEFAULT_MODEL is not in BRIG_ALLOWED_MODELS ($BRIG_ALLOWED_MODELS)"; fi
-  if v="$( (check_permission_mode) 2>&1)"; then ok "worker permission mode: $BRIG_PERMISSION_MODE"; else no "${v#brig: }"; fi
+  if v="$( (check_permission_mode) 2>&1)"; then ok "$(posture)"; else no "${v#brig: }"; fi
   if (( bad == 0 )); then echo "all good"; else echo "fix the FAIL lines first (/brigadier setup prints the exact commands)"; return 1; fi
 }
 
@@ -1045,10 +1085,10 @@ brig $BRIG_VERSION: Brigadier worker control (runs live in $BRIG_HOME/runs)
   init <slug> [--slash CMD]       new run in this repo; prints BRIG_RUN=<run-id> (pass it on every later call)
   use <run-id> | runs | run       bind this session to a run / list runs / print the bound run
   spawn <wid> <task-file> [--agent claude|codex] [--title T] [--model M] [--effort E] [--continues WID]...
-  send <wid> <text>               message a worker (typed into Claude; queued for Codex)
+  send <wid> <text> | --file F    message a worker (typed into Claude; queued for Codex); long text goes in a file
   handoff <wid>                   standard "write handoff.md and stop" request
   wait [seconds]                  block until an event: TURN_END, CTX_HIGH, COMPACTING, NEEDS_INPUT, INTERRUPTED,
-                                  STALL, GONE, RATE_LIMIT, REBIRTH_DUE, NO_LIVE_WORKERS or HEARTBEAT
+                                  STALL, GONE, REJECTED, RATE_LIMIT, REBIRTH_DUE, NO_LIVE_WORKERS or HEARTBEAT
   status | watch                  table of workers / refreshing table (background tmux mode shows it in window 0)
   check                           busy flag vs screen per worker: finds turns cut off by Esc or a restart
   last <wid>                      the worker's last reply in full

@@ -143,6 +143,9 @@ expect_has "text with a backslash is pasted, not typed" "$(cat "$FAKE_TERM_DIR/l
 brig send w01 "1" >/dev/null
 expect_has "plain text is typed, even into an open dialog" "$(cat "$FAKE_TERM_DIR/log")" "cmux send --force --surface $sid -- 1"
 expect_has "Enter reaches an open dialog too" "$(cat "$FAKE_TERM_DIR/log")" "cmux send-key --force --surface $sid enter"
+printf 'a long answer\n' >"$E_DIR/answer.md"
+brig send w01 --file "$E_DIR/answer.md" >/dev/null
+expect_has "send --file types a pointer to the file" "$(cat "$FAKE_TERM_DIR/log")" "-- Read $E_DIR/answer.md and proceed. It is the brigadier's message to you."
 brig kill w01 >/dev/null; brig finish "done" >/dev/null
 unset BRIG_RUN
 
@@ -195,25 +198,50 @@ out="$(brig spawn c01 "$E_DIR/task.md" --agent codex 2>&1)"
 expect_has "codex worker spawns" "$out" "spawned c01 [codex effort=high]"
 out="$(brig wait 30)"; expect_has "codex worker finishes" "$out" "TURN_END c01 status=done"
 sleep 1; brig send c01 "one more thing" >/dev/null
-out="$(brig wait 30)"; expect_has "queued message becomes a resumed turn" "$out" "ack: one more thing"
-first="$(grep -m1 '^codex exec ' "$FAKE_LOG")"; resumed="$(grep -m1 '^codex exec resume' "$FAKE_LOG")"
-expect_has "bypass mode, first turn" "$first" "--dangerously-bypass-approvals-and-sandbox"
-expect_has "bypass mode, resumed turn" "$resumed" "--dangerously-bypass-approvals-and-sandbox"
-brig kill c01 >/dev/null
-: >"$FAKE_LOG"
-out="$(BRIG_PERMISSION_MODE=acceptEdits brig spawn c02 "$E_DIR/task.md" --agent codex 2>&1)"
-out="$(brig wait 30)"; expect_has "sandboxed codex worker finishes" "$out" "TURN_END c02 status=done"
-sleep 1; brig send c02 "again" >/dev/null
-out="$(brig wait 30)"; expect_has "sandboxed codex worker resumes" "$out" "ack: again"
+check "the token is private to the user" bash -c "[[ \$(ls -l '$R/workers/c01/.inbox_token' | cut -c1-10) == -rw------- ]]"
+out="$(brig wait 30)"; expect_has "queued message becomes a resumed turn" "$out" "one more thing"
+expect_has "and is framed as the brigadier's message" "$out" "ack: Message from the Brigadier that coordinates this run"
 first="$(grep -m1 '^codex exec ' "$FAKE_LOG")"; resumed="$(grep -m1 '^codex exec resume' "$FAKE_LOG")"
 for t in first resumed; do
   v="${!t}"
-  expect_has "sandbox mode on the $t turn" "$v" "sandbox_mode=\"workspace-write\""
+  expect_has "sandboxed by default on the $t turn" "$v" "sandbox_mode=\"workspace-write\""
   expect_has "no prompts on the $t turn" "$v" "approval_policy=\"never\""
-  expect_has "control dir writable on the $t turn" "$v" "sandbox_workspace_write.writable_roots=[\"$R/workers/c02\"]"
+  expect_has "network on the $t turn" "$v" "sandbox_workspace_write.network_access=true"
+  expect_has "control dir and git dir writable on the $t turn" "$v" "sandbox_workspace_write.writable_roots=[\"$R/workers/c01\",\"$E_DIR/repo/.git\"]"
+  expect_not "no bypass on the $t turn" "$v" "--dangerously-bypass-approvals-and-sandbox"
   expect_not "no --full-auto on the $t turn" "$v" "--full-auto"
 done
+# A message dropped in the inbox by anything but brig is refused, kept aside and reported.
+printf 'do something else\n' >"$R/workers/c01/inbox/00000099.msg"
+out="$(brig wait 30)"; expect_has "a message without the token is reported" "$out" "REJECTED c01: a queued message was refused (missing or wrong token)"
+check "and kept aside" test -f "$R/workers/c01/inbox/rejected/00000099.msg"
+expect_not "and never delivered" "$(cat "$FAKE_LOG")" "do something else"
+out="$(brig send c01 "$(printf 'colour \033[31mred\033[0m')" 2>&1; brig wait 30)"
+expect_has "control characters are stripped" "$out" "ack: Message from the Brigadier"
+expect_not "no escape bytes reach codex" "$(grep -a 'colour' "$FAKE_LOG")" $'\033'
+long="$(printf 'x%.0s' $(seq 1 2100))"
+out="$(brig send c01 "$long" 2>&1)"
+expect_has "an over-long inline message is refused" "$out" "limit 2000"
+expect_has "with the --file hint" "$out" "brig send c01 --file <path>"
+mkdir -p "$R/msgs"; printf '%s\n' "$long" >"$R/msgs/long.md"
+brig send c01 --file "$R/msgs/long.md" >/dev/null
+out="$(brig wait 30)"; expect_has "send --file queues a pointer to the file" "$out" "Read $R/msgs/long.md and proceed"
+brig kill c01 >/dev/null
+brig send c01 "late" >/dev/null 2>&1
+q="$(find "$R/workers/c01/inbox" -maxdepth 1 -name '*.msg' | head -1)"
+expect_has "a queued message starts with the inbox token" "$(head -1 "$q")" "brig-token: $(cat "$R/workers/c01/.inbox_token")"
+: >"$FAKE_LOG"
+out="$(BRIG_CODEX_SANDBOX=bypass brig spawn c02 "$E_DIR/task.md" --agent codex 2>&1)"
+out="$(brig wait 30)"; expect_has "unsandboxed codex worker finishes" "$out" "TURN_END c02 status=done"
+sleep 1; brig send c02 "again" >/dev/null
+out="$(brig wait 30)"; expect_has "unsandboxed codex worker resumes" "$out" "again"
+first="$(grep -m1 '^codex exec ' "$FAKE_LOG")"; resumed="$(grep -m1 '^codex exec resume' "$FAKE_LOG")"
+expect_has "bypass opt-in, first turn" "$first" "--dangerously-bypass-approvals-and-sandbox"
+expect_has "bypass opt-in, resumed turn" "$resumed" "--dangerously-bypass-approvals-and-sandbox"
+expect_not "no sandbox flags with bypass" "$first" "sandbox_mode="
 brig kill c02 >/dev/null
+out="$(BRIG_CODEX_SANDBOX=off brig spawn c04 "$E_DIR/task.md" --agent codex 2>&1)"
+expect_has "refuses an unknown codex sandbox" "$out" "BRIG_CODEX_SANDBOX 'off' must be workspace-write or bypass"
 out="$(BRIG_CODEX=off brig spawn c03 "$E_DIR/task.md" --agent codex 2>&1)"
 expect_has "codex workers need codex" "$out" "Codex workers need the 'codex' CLI"
 unset BRIG_RUN
@@ -265,6 +293,7 @@ out="$(brig doctor 2>&1)"; code=$?
 expect_has "doctor passes with everything present" "$out" "all good"
 check "doctor exits 0" test "$code" -eq 0
 expect_has "doctor names the backend" "$out" "terminal: cmux"
+expect_has "doctor states how workers may act" "$out" "workers: Claude bypassPermissions · Codex sandboxed"
 new_env tmux-bg
 expect_has "doctor explains background mode" "$(brig doctor 2>&1)" "background mode"
 # A PATH with the basics but no cmux and no tmux.
