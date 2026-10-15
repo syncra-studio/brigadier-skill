@@ -56,11 +56,12 @@ mode="$(cat "$BRIG_HOME/fake-modes/$wid" 2>/dev/null || echo "done")"
 # Claude Code's trust dialog comes before any hook runs (measured on 2.1.300): "No, exit" is listed
 # first and has the cursor, so Enter alone exits. Keys arrive as <key:NAME> tokens on the Enter line.
 case "$mode" in
-  trust|trust-yes-first|trust-unreadable)
+  trust|trust-yes-first|trust-unreadable|trust-stuck)
     printf ' Accessing workspace:\n\n %s\n\n Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source project, or work from your team). If not, take a moment to review what'"'"'s in this folder first.\n\n Claude Code'"'"'ll be able to read, edit, and execute files here.\n\n Security guide\n\n' "$PWD"
     case "$mode" in
       trust) printf ' ❯ No, exit\n   Yes, I trust this folder\n'; want="<key:down>" ;;
       trust-yes-first) printf ' ❯ Yes, I trust this folder\n   No, exit\n'; want="" ;;
+      trust-stuck) printf ' ❯ No, exit\n  Yes, I trust this folder\n'; want="<key:down>" ;;  # the cursor won't redraw
       *) printf '   No, exit\n   Yes, I trust this folder\n'; want="<key:down>" ;;
     esac
     printf '\n Enter to confirm · Esc to cancel\n'

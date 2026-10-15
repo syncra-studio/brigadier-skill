@@ -529,7 +529,17 @@ check "nothing was pressed" test -z "$(cat "$FAKE_TERM_DIR/s/$(surface_of w02)/k
 expect_has "it is logged" "$(cat "$BRIG_HOME/runs/$RID/events.log")" "trust w02: dialog not readable"
 out="$(brig trust w01 2>&1)"
 expect_has "trust presses nothing when there's no dialog" "$out" "TRUST_UNREADABLE: w01's screen doesn't show Claude Code's trust dialog"
-brig kill w01 >/dev/null; brig kill w02 >/dev/null; unset BRIG_RUN
+fake_mode w03 trust-stuck
+brig spawn w03 "$E_DIR/task.md" >/dev/null 2>&1; sleep 4
+out="$(brig trust w03 2>&1)"; code=$?
+check "trust fails when the cursor doesn't reach Yes" test "$code" -ne 0
+expect_has "and doesn't press Enter" "$out" "TRUST_UNREADABLE: pressed down in w03's trust dialog, but the cursor isn't on 'Yes, I trust this folder'; Enter was not pressed"
+check "only down was pressed" test "$(cat "$FAKE_TERM_DIR/s/$(surface_of w03)/keys")" = down
+brig kill w01 >/dev/null; brig kill w02 >/dev/null
+brig spawn w04 "$E_DIR/task.md" >/dev/null 2>&1; brig wait 30 >/dev/null; rm -f "$BRIG_HOME/runs/$RID/workers/w04/session.json"
+out="$(brig trust w04 2>&1)"
+expect_has "a worker without a session and without the dialog: trust says so" "$out" "TRUST_UNREADABLE: w04's screen doesn't show Claude Code's trust dialog; nothing was pressed"
+brig kill w03 >/dev/null; brig kill w04 >/dev/null; unset BRIG_RUN
 # Windows: Claude Code keys the folder as C:/…; letter case doesn't matter.
 export PATH="$TESTS_DIR/fakes/win:$PATH" FAKE_WIN_ROOT="$T_ROOT"
 gb="$T_ROOT/Program Files/Git/bin/bash.exe"; mkdir -p "${gb%/*}"; : >"$gb"; export CLAUDE_CODE_GIT_BASH_PATH="$gb"
@@ -568,6 +578,15 @@ out="$(BRIG_RUN="$D" brig runs --overlap)"
 expect_has "no overlap is said plainly" "$out" "no other run on $E_DIR/repo was active during $D (2026-10-13 23:00 to 2026-10-13 23:30)"
 E2="$(run_id_of "$(brig init echo)")"; set_created "$E2" "2026-10-15 00:30"
 expect_has "an unfinished run counts as active until now" "$(BRIG_RUN="$D" brig runs --overlap; BRIG_RUN="$B" brig runs --overlap)" "overlap: $E2 (active, 2026-10-15 00:30 to now)"
+# More than 30 runs: every unfinished one is still listed, so a bare resume sees them all.
+old="$BRIG_HOME/runs/20200101-0000-old"; mkdir -p "$old"; printf 'REPO=%q\n' "$E_DIR/repo" >"$old/run.env"
+for i in $(seq 1 31); do
+  f="$BRIG_HOME/runs/20250101-0000-f$i"; mkdir -p "$f"; printf 'REPO=%q\n' "$E_DIR/repo" >"$f/run.env"; echo x >"$f/finished"
+done
+touch -t 202001010000 "$old"
+out="$(brig runs --here)"
+expect_has "an old unfinished run is listed past 30 newer finished ones" "$out" "20200101-0000-old"
+check "finished runs stop at 30 rows" test "$(grep -c ' finished ' <<<"$out")" -le 30
 
 echo "== a run may tighten the user's limits, never loosen them"
 new_env cmux
@@ -607,6 +626,9 @@ expect_has "the reborn brigadier keeps the user's default model" "$(cat "$R/rebi
 printf 'BRIG_DEFAULT_MODEL=haiku\n' >"$BRIG_HOME/config.env"
 BRIG_REBIRTH_TIMEOUT=20 brig rebirth >/dev/null 2>&1
 expect_has "from the user's config" "$(cat "$R/rebirth.sh")" "--model haiku"
+printf 'BRIG_DEFAULT_EFFORT=max\n' >>"$R/config.env"
+BRIG_REBIRTH_TIMEOUT=20 brig rebirth >/dev/null 2>&1
+expect_has "its effort stays at or below BRIG_MAX_EFFORT" "$(cat "$R/rebirth.sh")" "--effort high"
 brig kill successor >/dev/null 2>&1; brig kill w01 >/dev/null; brig kill c01 >/dev/null; unset BRIG_RUN
 
 echo "== the reborn brigadier's permission mode"

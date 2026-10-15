@@ -11,7 +11,7 @@ Brigadier starts Claude Code and, optionally, Codex sessions on your machine and
 Brigadier itself:
 - runs your own, unmodified `claude` and `codex` binaries, and never handles, stores or forwards your credentials or tokens;
 - makes no network requests of its own (on Windows with openwong2kim/wmux it talks to that app's local named pipe, using the app's own auth token file);
-- keeps all run state in `~/.claude/brigadier/` on your machine.
+- keeps all run state in `~/.claude/brigadier/` on your machine;
 - only reads Claude Code's `.claude.json` (to warn at spawn about a folder Claude Code hasn't trusted) and never writes it. The brigadier accepts a worker's "trust this folder" dialog only for the run's own repo, or a worktree or subfolder of it; any other folder is left for you.
 
 `brig setup` (`/brigadier setup`):

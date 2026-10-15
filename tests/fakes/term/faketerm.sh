@@ -52,6 +52,19 @@ ft_enter() {
 ft_key() {
   local sd; sd="$(ft_dir "$1")"; ft_alive "$1" || return 1
   echo "$2" >>"$sd/keys"; printf '<key:%s>' "$2" >>"$sd/pending"
+  case "$2" in up|down) ft_move_cursor "$sd/screen" "$2" ;; esac
+}
+# ft_move_cursor <screen> <up|down>: a list on screen redraws its ❯ cursor one row up or down, as a
+# dialog does. Rows look like " ❯ Option" and "   Option"; the screen keeps its length in bytes.
+ft_move_cursor() {
+  local t; t="$(mktemp "$1.XXXXXX")" || return 0
+  awk -v dir="$2" '{ l[NR] = $0; if (index($0, "❯")) c = NR }
+    END {
+      t = (dir == "down") ? c + 1 : c - 1
+      if (c && t >= 1 && t <= NR && l[t] ~ /^   [^ ]/) { sub(/❯/, " ", l[c]); sub(/^   /, " ❯ ", l[t]) }
+      for (i = 1; i <= NR; i++) print l[i]
+    }' "$1" >"$t" && cat "$t" >"$1"
+  rm -f "$t"
 }
 ft_read() { local sd; sd="$(ft_dir "$1")"; [[ -d "$sd" ]] || return 1; tail -n "${2:-40}" "$sd/screen"; }
 ft_close() {

@@ -517,7 +517,7 @@ TRUST_YES="Yes, I trust this folder"
 is_trust_screen() { grep -qF "$TRUST_YES" <<<"$1" || grep -qF "Is this a project you created or one you trust" <<<"$1"; }
 trust_dir_of() { awk '/Accessing workspace:/ { f = 1; next } f && NF { sub(/^[ \t]+/, ""); sub(/[ \t]+$/, ""); print; exit }' <<<"$1"; }
 trust_options_of() {
-  grep -E "No, exit|$TRUST_YES|No, continue without" <<<"$1" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' | paste -sd'|' - | sed 's/|/ | /g'
+  { grep -E "No, exit|$TRUST_YES|No, continue without" <<<"$1" || true; } | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' | paste -sd'|' - | sed 's/|/ | /g'
 }
 
 # ---- hooks (invoked by a Claude worker via --settings) -----------------------------
@@ -616,12 +616,16 @@ cmd_runs() {
     *) die "usage: brig runs [--here | --overlap]" ;;
   esac
   printf '%-34s %-9s %-17s %-17s %s · %s\n' RUN STATE STARTED LAST REPO GOAL
-  # shellcheck disable=SC2012 # run ids are [A-Za-z0-9-] by construction; ls -t gives newest first
-  for e in $(ls -1t "$BRIG_HOME/runs" | head -30); do
+  # Every unfinished run is listed (a bare resume picks from them); finished ones up to 30 rows.
+  local n=0
+  # shellcheck disable=SC2012,SC2045 # run ids are [A-Za-z0-9-] by construction; ls -t gives newest first
+  for e in $(ls -1t "$BRIG_HOME/runs"); do
     [[ -f "$BRIG_HOME/runs/$e/run.env" ]] || continue
+    [[ -f "$BRIG_HOME/runs/$e/finished" ]] && (( n >= 30 )) && continue
     IFS=$'\037' read -r -a f <<<"$(run_fields "$e")"
     [[ -z "$here" || "${f[5]}" == "$here" ]] || continue
     printf '%-34s %-9s %-17s %-17s %s · %s\n' "${f[0]}" "${f[1]}" "${f[2]}" "${f[4]}" "${f[5]}" "${f[6]:-}"
+    n=$((n + 1))
   done
 }
 cmd_overlap() {
@@ -858,8 +862,22 @@ cmd_trust() {
   moves=$(( yes - cur ))
   while (( moves > 0 )); do keys+=(down); moves=$((moves - 1)); done
   while (( moves < 0 )); do keys+=(up); moves=$((moves + 1)); done
+  # Enter only once the screen shows the cursor on "Yes, I trust this folder": never on "No, exit".
+  if (( ${#keys[@]} )); then
+    cmd_key "$wid" "${keys[@]}" >/dev/null
+    local on_yes=""
+    for (( i = 0; i < 10; i++ )); do
+      sleep 0.3
+      txt="$(be_read "$sid" 30 2>/dev/null)" || continue
+      if grep -F "$TRUST_YES" <<<"$txt" | tail -1 | grep -q '❯'; then on_yes=1; break; fi
+    done
+    if [[ -z "$on_yes" ]]; then
+      log_event "trust $wid: pressed ${keys[*]}, but the cursor isn't on Yes; Enter not pressed"
+      die "TRUST_UNREADABLE: pressed ${keys[*]} in $wid's trust dialog, but the cursor isn't on '$TRUST_YES'; Enter was not pressed. Only the user can answer it now (brig screen $wid)"
+    fi
+  fi
   keys+=(enter)
-  cmd_key "$wid" "${keys[@]}" >/dev/null
+  cmd_key "$wid" enter >/dev/null
   log_event "trust $wid: accepted (${keys[*]})"
   # Claude Code runs its SessionStart hook once the folder is trusted.
   for (( i = 0; i < 30; i++ )); do
@@ -904,6 +922,10 @@ cmd_rebirth() {
   model_allowed "$model" "$USER_ALLOWED_MODELS" || die "BRIG_DEFAULT_MODEL=$model is not in BRIG_ALLOWED_MODELS ($USER_ALLOWED_MODELS); fix $USER_CONFIG"
   local prompt="${SLASH:-/brigadier} resume $RUN_ID"
   [[ -n "$note" ]] && prompt+=". First read $(native_path "$note"): it is the previous brigadier's note to you."
+  # BRIG_MAX_EFFORT holds for the brigadier too: a default above it starts at the ceiling.
+  local effort="$BRIG_DEFAULT_EFFORT"
+  if (( $(effort_rank "$effort") == 0 || $(effort_rank "$effort") > $(effort_rank "$BRIG_MAX_EFFORT") )); then effort="$BRIG_MAX_EFFORT"; fi
+  check_effort "$effort"
   local skip=false; [[ "$BRIG_PERMISSION_MODE" == bypassPermissions ]] && skip=true
   jq -n --argjson skip "$skip" '{skipDangerousModePermissionPrompt: $skip}' >"$RUN/rebirth-settings.json"
   {
@@ -914,7 +936,7 @@ cmd_rebirth() {
     win_launch_lines
     echo "export BRIG_RUN=$(q "$RUN")"
     printf 'exec claude --permission-mode %s --settings %s --model %s --effort %s --name %s %s\n' \
-      "$(q "$BRIG_PERMISSION_MODE")" "$(q "$(native_path "$RUN/rebirth-settings.json")")" "$(q "$model")" "$(q "$BRIG_DEFAULT_EFFORT")" \
+      "$(q "$BRIG_PERMISSION_MODE")" "$(q "$(native_path "$RUN/rebirth-settings.json")")" "$(q "$model")" "$(q "$effort")" \
       "$(q "Brigadier · ${RUN_ID#*-*-}")" "$(q "$prompt")"
   } >"$RUN/rebirth.sh"
   chmod +x "$RUN/rebirth.sh"
