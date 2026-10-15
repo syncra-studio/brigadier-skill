@@ -126,12 +126,45 @@ for _k in $BRIG_KEYS; do
 done
 USER_CONFIG="$BRIG_HOME/config.env"
 
+effort_rank() { case "$1" in low) echo 1 ;; medium) echo 2 ;; high) echo 3 ;; xhigh) echo 4 ;; max) echo 5 ;; *) echo 0 ;; esac; }
+# models_within <list> <limit>: every model in <list> is allowed by <limit> ("*" allows any).
+models_within() {
+  [[ "$2" == "*" ]] && return 0
+  [[ "$1" == "*" ]] && return 1
+  local m; for m in $1; do [[ " $2 " == *" $m "* ]] || return 1; done
+}
+envset() { [[ "$ENV_SET" == *" $1 "* ]]; }
+# After load_config:
+#   RUN_IGNORED          run-level settings dropped because they'd loosen the user's own limits
+#   RUN_MODEL_DIRECTIVE  the run's config.env names the workers' model (a model directive in the goal)
+#   RUN_CODEX_ON         the run's config.env says BRIG_CODEX=on (the goal names Codex for a role)
+#   USER_DEFAULT_MODEL, USER_ALLOWED_MODELS  the user's own (config file or environment), for the brigadier
 load_config() {
-  local run="${1:-}" k v
+  local run="${1:-}" k v um ua
   for k in $BRIG_KEYS; do unset "$k"; done
+  RUN_IGNORED=""; RUN_MODEL_DIRECTIVE=""; RUN_CODEX_ON=""
   if [[ -f "$USER_CONFIG" ]]; then source_file "$USER_CONFIG" || die "cannot read $USER_CONFIG"; fi
-  if [[ -n "$run" && -f "$run/config.env" ]]; then source_file "$run/config.env" || die "cannot read $run/config.env"; fi
+  # The user's limits. A run may tighten them, never loosen them.
+  um="${BRIG_MAX_EFFORT:-high}"; ua="${BRIG_ALLOWED_MODELS:-*}"; USER_DEFAULT_MODEL="${BRIG_DEFAULT_MODEL:-opus}"
+  if envset BRIG_MAX_EFFORT; then um="$ENV_BRIG_MAX_EFFORT"; fi
+  if envset BRIG_ALLOWED_MODELS; then ua="$ENV_BRIG_ALLOWED_MODELS"; fi
+  if envset BRIG_DEFAULT_MODEL; then USER_DEFAULT_MODEL="$ENV_BRIG_DEFAULT_MODEL"; fi
+  USER_ALLOWED_MODELS="$ua"
+  if [[ -n "$run" && -f "$run/config.env" ]]; then
+    unset BRIG_MAX_EFFORT BRIG_ALLOWED_MODELS
+    source_file "$run/config.env" || die "cannot read $run/config.env"
+    if [[ -n "${BRIG_MAX_EFFORT:-}" ]] && ! (( $(effort_rank "$BRIG_MAX_EFFORT") > 0 && $(effort_rank "$BRIG_MAX_EFFORT") <= $(effort_rank "$um") )); then
+      RUN_IGNORED+="BRIG_MAX_EFFORT "; unset BRIG_MAX_EFFORT
+    fi
+    if [[ -n "${BRIG_ALLOWED_MODELS:-}" ]] && ! models_within "$BRIG_ALLOWED_MODELS" "$ua"; then
+      RUN_IGNORED+="BRIG_ALLOWED_MODELS "; unset BRIG_ALLOWED_MODELS
+    fi
+    : "${BRIG_MAX_EFFORT:=$um}" "${BRIG_ALLOWED_MODELS:=$ua}"
+    if grep -Eq '^[[:space:]]*(export[[:space:]]+)?BRIG_DEFAULT_MODEL=' "$run/config.env"; then RUN_MODEL_DIRECTIVE=1; fi
+    if grep -Eq '^[[:space:]]*(export[[:space:]]+)?BRIG_CODEX=["'"'"']?on' "$run/config.env"; then RUN_CODEX_ON=1; fi
+  fi
   for k in $ENV_SET; do v="ENV_$k"; printf -v "$k" '%s' "${!v}"; done
+  envset BRIG_DEFAULT_MODEL && RUN_MODEL_DIRECTIVE=""
   : "${BRIG_BACKEND:=auto}" "${BRIG_DEFAULT_MODEL:=opus}" "${BRIG_CHORE_MODEL:=sonnet}" "${BRIG_ALLOWED_MODELS:=*}"
   : "${BRIG_DEFAULT_EFFORT:=high}" "${BRIG_MAX_EFFORT:=high}" "${BRIG_MAX_WORKERS:=3}"
   : "${BRIG_CTX_PCT:=70}" "${BRIG_CTX_TOKENS:=300000}" "${BRIG_SELF_TOKENS:=150000}"
@@ -141,17 +174,12 @@ load_config() {
 }
 load_config
 
-effort_rank() { case "$1" in low) echo 1 ;; medium) echo 2 ;; high) echo 3 ;; xhigh) echo 4 ;; max) echo 5 ;; *) echo 0 ;; esac; }
 check_effort() {
   local r m; r="$(effort_rank "$1")"; m="$(effort_rank "$BRIG_MAX_EFFORT")"
   (( r > 0 )) || die "unknown effort '$1' (low, medium, high, xhigh, max)"
   (( r <= m )) || die "effort '$1' is above BRIG_MAX_EFFORT=$BRIG_MAX_EFFORT (raise it in $USER_CONFIG if you mean it)"
 }
-model_allowed() {
-  [[ "$BRIG_ALLOWED_MODELS" == "*" ]] && return 0
-  local m; for m in $BRIG_ALLOWED_MODELS; do [[ "$m" == "$1" ]] && return 0; done
-  return 1
-}
+model_allowed() { models_within "$1" "${2:-$BRIG_ALLOWED_MODELS}"; }
 claude_model() {
   local m="${1:-$BRIG_DEFAULT_MODEL}"
   model_allowed "$m" || die "model '$m' is not in BRIG_ALLOWED_MODELS ($BRIG_ALLOWED_MODELS); change the list in $USER_CONFIG"
@@ -175,7 +203,7 @@ check_permission_mode() {
 posture() {
   local cx="Codex sandboxed (workspace-write: the repo, its git dirs and the worker's own dir; network on)"
   [[ "$BRIG_CODEX_SANDBOX" == bypass ]] && cx="Codex unsandboxed (BRIG_CODEX_SANDBOX=bypass)"
-  echo "workers: Claude $BRIG_PERMISSION_MODE · $cx. Change with BRIG_PERMISSION_MODE and BRIG_CODEX_SANDBOX in $USER_CONFIG"
+  echo "workers and the reborn brigadier: Claude $BRIG_PERMISSION_MODE · $cx. Change with BRIG_PERMISSION_MODE and BRIG_CODEX_SANDBOX in $USER_CONFIG"
 }
 # Longest message `brig send` types or queues; anything longer goes through a file (send --file).
 MSG_MAX=2000
@@ -541,12 +569,62 @@ cmd_use() {
   echo "$BRIG_HOME/runs/$id"
 }
 cmd_run() { run_dir; }
+# One run, as fields: id, state, started, finished (or ""), last event, repo, first line of the goal.
+run_fields() {
+  local e="$1" d="$BRIG_HOME/runs/$1" st=active fin="" last="" repo created goal
+  [[ -f "$d/finished" ]] && { st=finished; fin="$(readf "$d/finished")"; }
+  # run.env is shell (printf %q); read it in a bash of its own.
+  # shellcheck disable=SC2016
+  IFS=$'\037' read -r repo created <<<"$(bash -c 'source "$1" >/dev/null 2>&1; printf "%s\037%s\n" "${REPO:-}" "${CREATED:-}"' _ "$d/run.env")"
+  [[ -f "$d/events.log" ]] && last="$(ymdhm "$(mtime "$d/events.log")")"
+  if [[ -f "$d/goal.md" ]]; then
+    goal="$(grep -m1 -v '^[[:space:]]*$' "$d/goal.md" | tr -d '\r' | sed -E 's/^#+[[:space:]]*//' | cut -c1-70)"
+  else goal="(no goal.md)"; fi
+  printf '%s\037%s\037%s\037%s\037%s\037%s\037%s\n' "$e" "$st" "${created:--}" "$fin" "${last:--}" "$repo" "$goal"
+}
+ymdhm() {
+  (( $1 > 0 )) || { echo "-"; return; }
+  date -d "@$1" '+%Y-%m-%d %H:%M' 2>/dev/null || date -r "$1" '+%Y-%m-%d %H:%M' 2>/dev/null || echo "-"
+}
+this_repo() { git rev-parse --show-toplevel 2>/dev/null || pwd; }
+# brig runs [--here]: newest first. --here: only runs of the repo you're in.
+# brig runs --overlap: other runs on this run's repo that were active at some point during it, judged
+# by full start and finish times (an unfinished run counts as active until now).
 cmd_runs() {
-  local e; [[ -d "$BRIG_HOME/runs" ]] || return 0
+  local mode="${1:-}" e f here=""
+  [[ -d "$BRIG_HOME/runs" ]] || return 0
+  case "$mode" in
+    "") ;;
+    --here) here="$(this_repo)" ;;
+    --overlap) cmd_overlap; return ;;
+    *) die "usage: brig runs [--here | --overlap]" ;;
+  esac
+  printf '%-34s %-9s %-17s %-17s %s · %s\n' RUN STATE STARTED LAST REPO GOAL
   # shellcheck disable=SC2012 # run ids are [A-Za-z0-9-] by construction; ls -t gives newest first
-  for e in $(ls -1t "$BRIG_HOME/runs" | head -20); do
-    if [[ -f "$BRIG_HOME/runs/$e/finished" ]]; then echo "$e  finished"; else echo "$e  active"; fi
+  for e in $(ls -1t "$BRIG_HOME/runs" | head -30); do
+    [[ -f "$BRIG_HOME/runs/$e/run.env" ]] || continue
+    IFS=$'\037' read -r -a f <<<"$(run_fields "$e")"
+    [[ -z "$here" || "${f[5]}" == "$here" ]] || continue
+    printf '%-34s %-9s %-17s %-17s %s · %s\n' "${f[0]}" "${f[1]}" "${f[2]}" "${f[4]}" "${f[5]}" "${f[6]:-}"
   done
+}
+cmd_overlap() {
+  local me mf e f now start end ostart oend n=0
+  RUN="$(run_dir)"; me="$(basename "$RUN")"; now="$(date '+%Y-%m-%d %H:%M')"
+  IFS=$'\037' read -r -a mf <<<"$(run_fields "$me")"
+  start="${mf[2]}"; end="${mf[3]:-$now}"
+  for e in "$BRIG_HOME"/runs/*; do
+    e="$(basename "$e")"
+    [[ "$e" != "$me" && -f "$BRIG_HOME/runs/$e/run.env" ]] || continue
+    IFS=$'\037' read -r -a f <<<"$(run_fields "$e")"
+    [[ "${f[5]}" == "${mf[5]}" && "${f[2]}" != - ]] || continue
+    ostart="${f[2]}"; oend="${f[3]:-$now}"
+    # "YYYY-MM-DD HH:MM" compares as text.
+    if [[ ! "$ostart" > "$end" && ! "$start" > "$oend" ]]; then
+      echo "overlap: ${f[0]} (${f[1]}, $ostart to ${f[3]:-now}) · ${f[6]:-}"; n=$((n + 1))
+    fi
+  done
+  (( n > 0 )) || echo "no other run on ${mf[5]} was active during $me ($start to ${mf[3]:-now})"
 }
 
 render_protocol() {
@@ -586,7 +664,9 @@ cmd_spawn() {
   check_permission_mode
   case "$agent" in
     claude) model="$(claude_model "$model")" ;;
-    codex) codex_on || die "Codex workers need the 'codex' CLI on PATH (and BRIG_CODEX not 'off')"
+    codex) [[ -z "$RUN_MODEL_DIRECTIVE" || -n "$RUN_CODEX_ON" ]] \
+             || die "this run's goal names the workers' model ($RUN/config.env sets BRIG_DEFAULT_MODEL=$BRIG_DEFAULT_MODEL), so no Codex workers: spawn a Claude worker. If the goal names Codex for a role, put BRIG_CODEX=on in $RUN/config.env"
+           codex_on || die "Codex workers need the 'codex' CLI on PATH (and BRIG_CODEX not 'off')"
            [[ "$model" != *claude* ]] || die "codex model '$model' makes no sense" ;;
     *) die "agent must be claude or codex" ;;
   esac
@@ -802,7 +882,10 @@ cmd_rebirth() {
   open_run
   if [[ -n "$note" ]]; then note="$(abspath "$note")"; [[ -f "$note" ]] || die "no such note: $1"; fi
   check_permission_mode
-  local model; model="$(claude_model "")"
+  # The brigadier runs on the user's own default model: a model directive in the goal covers the
+  # workers, so the run's config.env doesn't apply here.
+  local model="$USER_DEFAULT_MODEL"
+  model_allowed "$model" "$USER_ALLOWED_MODELS" || die "BRIG_DEFAULT_MODEL=$model is not in BRIG_ALLOWED_MODELS ($USER_ALLOWED_MODELS); fix $USER_CONFIG"
   local prompt="${SLASH:-/brigadier} resume $RUN_ID"
   [[ -n "$note" ]] && prompt+=". First read $(native_path "$note"): it is the previous brigadier's note to you."
   local skip=false; [[ "$BRIG_PERMISSION_MODE" == bypassPermissions ]] && skip=true
@@ -1093,6 +1176,7 @@ cmd_config() {
   [[ -n "$r" ]] && echo "run config:  $r/config.env $([[ -f "$r/config.env" ]] && echo "(found)" || echo "(none)")"
   for k in $BRIG_KEYS; do
     if [[ "$ENV_SET" == *" $k "* ]]; then src="env"
+    elif [[ " $RUN_IGNORED " == *" $k "* ]]; then src="user (the run's value is ignored: a run may tighten your limits, not loosen them)"
     elif [[ -n "$r" && -f "$r/config.env" ]] && grep -Eq "^(export )?$k=" "$r/config.env"; then src=run
     elif [[ -f "$USER_CONFIG" ]] && grep -Eq "^(export )?$k=" "$USER_CONFIG"; then src=user
     else src=default; fi
@@ -1297,7 +1381,9 @@ brig $BRIG_VERSION: Brigadier worker control (runs live in $BRIG_HOME/runs)
   doctor                          check this machine (terminal backend, claude, codex, jq, config)
   config                          effective settings and where each comes from
   init <slug> [--slash CMD]       new run in this repo; prints BRIG_RUN=<run-id> (pass it on every later call)
-  use <run-id> | runs | run       bind this session to a run / list runs / print the bound run
+  use <run-id> | run              bind this session to a run / print the bound run
+  runs [--here | --overlap]       list runs (state, start, last event, repo, goal); --here: this repo only;
+                                  --overlap: other runs on this run's repo that were active during it
   spawn <wid> <task-file> [--agent claude|codex] [--title T] [--model M] [--effort E] [--continues WID]...
   send <wid> <text> | --file F    message a worker (typed into Claude; queued for Codex); long text goes in a file
   key <wid|successor> <key>...    press keys in order to answer a dialog: enter, escape, up, down, left, right, tab, space, 1-9

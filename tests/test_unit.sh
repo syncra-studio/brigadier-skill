@@ -425,7 +425,7 @@ out="$(brig doctor 2>&1)"; code=$?
 expect_has "doctor passes with everything present" "$out" "all good"
 check "doctor exits 0" test "$code" -eq 0
 expect_has "doctor names the backend" "$out" "terminal: cmux"
-expect_has "doctor states how workers may act" "$out" "workers: Claude bypassPermissions · Codex sandboxed"
+expect_has "doctor states how workers may act" "$out" "workers and the reborn brigadier: Claude bypassPermissions · Codex sandboxed"
 new_env tmux-bg
 expect_has "doctor explains background mode" "$(brig doctor 2>&1)" "background mode"
 # A PATH with the basics but no cmux and no tmux.
@@ -521,6 +521,90 @@ expect_not "on Windows the C:/ key is found, in any case" "$(spawn_in "$E_DIR/re
 trust "$E_DIR/repo" >"$CJ"
 expect_has "and a POSIX key is not Claude Code's" "$(spawn_in "$E_DIR/repo")" "hasn't trusted $winrepo yet"
 unset FAKE_WIN_ROOT CLAUDE_CODE_GIT_BASH_PATH; export PATH="${PATH#"$TESTS_DIR/fakes/win:"}"
+
+echo "== runs, resume candidates and overlapping runs"
+new_env cmux
+set_created() { sed -i.bak "s/^CREATED=.*/CREATED='$2'/" "$BRIG_HOME/runs/$1/run.env" && rm -f "$BRIG_HOME/runs/$1/run.env.bak"; }
+A="$(run_id_of "$(brig init alpha)")"; printf '# Phase 1: build the thing\n\nmore\n' >"$BRIG_HOME/runs/$A/goal.md"
+B="$(run_id_of "$(brig init bravo)")"; BRIG_RUN="$B" brig finish "x" >/dev/null
+mkdir -p "$E_DIR/other"; C="$(cd "$E_DIR/other" && run_id_of "$(brig init charlie)")"
+out="$(brig runs)"
+expect_has "runs has a header" "$out" "RUN                                STATE     STARTED           LAST              REPO · GOAL"
+expect_has "runs shows each run's state" "$out" "$(printf '%-34s %-9s' "$A" active)"
+expect_has "the goal's first line" "$out" "$E_DIR/repo · Phase 1: build the thing"
+expect_has "a run without goal.md says so" "$out" "$E_DIR/repo · (no goal.md)"
+expect_has "finished runs are marked" "$out" "$(printf '%-34s %-9s' "$B" finished)"
+out="$(brig runs --here)"
+expect_has "--here keeps this repo's runs" "$out" "$(printf '%-34s %-9s' "$A" active)"
+expect_not "and drops other repos' runs" "$out" "$C"
+# Overlap is judged on full dates: an overnight run, and one that only looks close by HH:MM.
+set_created "$A" "2026-10-14 22:00"
+set_created "$B" "2026-10-14 21:30"; echo "2026-10-15 01:10" >"$BRIG_HOME/runs/$B/finished"
+D="$(run_id_of "$(brig init delta)")"; set_created "$D" "2026-10-13 23:00"; echo "2026-10-13 23:30" >"$BRIG_HOME/runs/$D/finished"
+set_created "$C" "2026-10-14 23:00"
+out="$(BRIG_RUN="$A" brig runs --overlap)"
+expect_has "an overnight run on the same repo overlaps" "$out" "overlap: $B (finished, 2026-10-14 21:30 to 2026-10-15 01:10)"
+expect_not "a run two days earlier doesn't, whatever its HH:MM" "$out" "$D"
+expect_not "nor a run on another repo" "$out" "$C"
+out="$(BRIG_RUN="$D" brig runs --overlap)"
+expect_has "no overlap is said plainly" "$out" "no other run on $E_DIR/repo was active during $D (2026-10-13 23:00 to 2026-10-13 23:30)"
+E2="$(run_id_of "$(brig init echo)")"; set_created "$E2" "2026-10-15 00:30"
+expect_has "an unfinished run counts as active until now" "$(BRIG_RUN="$D" brig runs --overlap; BRIG_RUN="$B" brig runs --overlap)" "overlap: $E2 (active, 2026-10-15 00:30 to now)"
+
+echo "== a run may tighten the user's limits, never loosen them"
+new_env cmux
+printf 'BRIG_ALLOWED_MODELS="opus sonnet"\n' >"$BRIG_HOME/config.env"
+RID="$(run_id_of "$(brig init limits)")"; export BRIG_RUN="$RID"; R="$BRIG_HOME/runs/$RID"
+printf 'BRIG_MAX_EFFORT=max\nBRIG_ALLOWED_MODELS="opus sonnet haiku"\n' >"$R/config.env"
+out="$(brig spawn w01 "$E_DIR/task.md" --effort max 2>&1)"
+expect_has "a looser run-level effort ceiling is ignored" "$out" "effort 'max' is above BRIG_MAX_EFFORT=high"
+out="$(brig spawn w01 "$E_DIR/task.md" --model haiku 2>&1)"
+expect_has "a looser run-level allowlist is ignored" "$out" "model 'haiku' is not in BRIG_ALLOWED_MODELS (opus sonnet)"
+out="$(brig config)"
+expect_has "config says why" "$out" "BRIG_MAX_EFFORT        high                     user (the run's value is ignored: a run may tighten your limits, not loosen them)"
+expect_has "for both" "$out" "BRIG_ALLOWED_MODELS    opus sonnet              user (the run's value is ignored"
+printf 'BRIG_MAX_EFFORT=medium\nBRIG_ALLOWED_MODELS=sonnet\n' >"$R/config.env"
+out="$(brig spawn w01 "$E_DIR/task.md" --effort high --model sonnet 2>&1)"
+expect_has "a tighter run-level effort ceiling applies" "$out" "effort 'high' is above BRIG_MAX_EFFORT=medium"
+out="$(brig spawn w01 "$E_DIR/task.md" --effort medium 2>&1)"
+expect_has "a tighter run-level allowlist applies" "$out" "model 'opus' is not in BRIG_ALLOWED_MODELS (sonnet)"
+expect_has "and config shows it as the run's" "$(brig config)" "BRIG_MAX_EFFORT        medium                   run"
+rm -f "$BRIG_HOME/config.env"; printf 'BRIG_ALLOWED_MODELS="sonnet haiku"\n' >"$R/config.env"
+expect_has "any list tightens '*'" "$(brig spawn w01 "$E_DIR/task.md" --model opus 2>&1)" "model 'opus' is not in BRIG_ALLOWED_MODELS (sonnet haiku)"
+unset BRIG_RUN
+
+echo "== a model directive in the goal"
+new_env cmux
+RID="$(run_id_of "$(brig init directive)")"; export BRIG_RUN="$RID"; R="$BRIG_HOME/runs/$RID"
+printf 'BRIG_DEFAULT_MODEL=sonnet\nBRIG_CHORE_MODEL=sonnet\n' >"$R/config.env"
+out="$(brig spawn w01 "$E_DIR/task.md" --title "Phase 1 · verify" 2>&1)"
+expect_has "every worker gets the run's model, verifiers included" "$out" "spawned w01 [claude sonnet effort=high]"
+out="$(brig spawn c01 "$E_DIR/task.md" --agent codex 2>&1)"
+expect_has "and Codex workers are refused" "$out" "this run's goal names the workers' model ($R/config.env sets BRIG_DEFAULT_MODEL=sonnet), so no Codex workers"
+printf 'BRIG_CODEX=on\n' >>"$R/config.env"
+expect_has "unless the goal names Codex for a role" "$(brig spawn c01 "$E_DIR/task.md" --agent codex 2>&1)" "spawned c01 [codex"
+fake_mode successor ack
+out="$(BRIG_REBIRTH_TIMEOUT=20 brig rebirth 2>&1)"
+expect_has "the reborn brigadier keeps the user's default model" "$(cat "$R/rebirth.sh")" "--model opus"
+printf 'BRIG_DEFAULT_MODEL=haiku\n' >"$BRIG_HOME/config.env"
+BRIG_REBIRTH_TIMEOUT=20 brig rebirth >/dev/null 2>&1
+expect_has "from the user's config" "$(cat "$R/rebirth.sh")" "--model haiku"
+brig kill successor >/dev/null 2>&1; brig kill w01 >/dev/null; brig kill c01 >/dev/null; unset BRIG_RUN
+
+echo "== the reborn brigadier's permission mode"
+new_env cmux
+RID="$(run_id_of "$(brig init perms)")"; export BRIG_RUN="$RID"; R="$BRIG_HOME/runs/$RID"
+fake_mode successor ack
+BRIG_REBIRTH_TIMEOUT=20 brig rebirth >/dev/null 2>&1
+expect_has "by default it bypasses permissions, like workers" "$(cat "$R/rebirth.sh")" "--permission-mode bypassPermissions"
+expect_has "without the bypass warning" "$(jq -c . "$R/rebirth-settings.json")" '{"skipDangerousModePermissionPrompt":true}'
+brig kill successor >/dev/null 2>&1
+printf 'BRIG_PERMISSION_MODE=manual\n' >"$BRIG_HOME/config.env"
+BRIG_REBIRTH_TIMEOUT=20 brig rebirth >/dev/null 2>&1
+expect_has "it follows BRIG_PERMISSION_MODE" "$(cat "$R/rebirth.sh")" "--permission-mode manual"
+expect_has "with no bypass setting" "$(jq -c . "$R/rebirth-settings.json")" '{"skipDangerousModePermissionPrompt":false}'
+expect_has "doctor names the brigadier too" "$(brig doctor 2>&1)" "workers and the reborn brigadier: Claude manual"
+brig kill successor >/dev/null 2>&1; unset BRIG_RUN
 
 echo "== installed copy without exec bits"
 new_env cmux
