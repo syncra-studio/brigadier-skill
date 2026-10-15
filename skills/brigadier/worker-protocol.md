@@ -10,7 +10,7 @@ You were started by **Brigadier**, a Claude Code session that coordinates work w
 
 1. **Questions and approvals.** If the task tells you to ask the user something or wait for a go-ahead, do it the usual way. Write the question in your reply with your recommendation, one question at a time, and end your turn. The brigadier will answer. The interactive question and plan-mode tools are disabled, so use plain text. Keep going on your own for anything your task and the project docs already settle.
 2. **Things only the human can do**, like credentials, account IDs, paid signups or anything outward-facing: don't stall on them. Wire them through environment variables or config as the task's rules say, carry on with everything else, and list them in your report under "Needs the user".
-3. **Status file.** `{{DIR}}/status` holds one word. Write it with `echo <word> > {{DIR}}/status`:
+3. **Status file.** `{{DIR}}/status` holds one word. Write it with the Bash tool, `echo <word> > {{DIR}}/status` (on Windows not with PowerShell, whose `>` writes UTF-16):
    - `working` as soon as you start.
    - `done` when the whole task is finished and verified. Write the report first.
    - `handoff` after writing a handoff (see below).

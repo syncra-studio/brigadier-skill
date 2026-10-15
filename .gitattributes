@@ -1,0 +1,5 @@
+# Scripts must keep LF endings on every checkout, including Git for Windows with core.autocrlf=true:
+# bash stops at the first CRLF line ("invalid option name", "$'\r': command not found").
+* text=auto eol=lf
+*.gif binary
+*.png binary

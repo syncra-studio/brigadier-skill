@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Fake uname for the Windows-simulation tests: answers like Git Bash on Windows 10.
+case "${1:-}" in
+  -s|"") echo "MINGW64_NT-10.0-19045" ;;
+  -r) echo "3.5.4-0bc1222b.x86_64" ;;
+  -m) echo "x86_64" ;;
+  *) echo "MINGW64_NT-10.0-19045 host 3.5.4-0bc1222b.x86_64 2024-09-04 x86_64 Msys" ;;
+esac

@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Fake cygpath for the Windows-simulation tests. Paths under $FAKE_WIN_ROOT map to C:/fake
+# (-m), C:\fake (-w) and back (-u); everything else passes through unchanged.
+set -uo pipefail
+mode="$1" p="$2" r="${FAKE_WIN_ROOT:-}"
+[[ -n "${FAKE_LOG:-}" ]] && printf 'cygpath %s %s\n' "$mode" "$p" >>"$FAKE_LOG"
+case "$mode" in
+  -m) if [[ -n "$r" && "$p" == "$r"* ]]; then p="C:/fake${p#"$r"}"; fi; echo "$p" ;;
+  -w) if [[ -n "$r" && "$p" == "$r"* ]]; then p="C:/fake${p#"$r"}"; fi
+      if [[ "$p" == /* ]]; then p="C:/git$p"; fi
+      echo "${p//\//\\}" ;;
+  -u) p="${p//\\//}"; if [[ -n "$r" && "$p" == C:/fake* ]]; then p="$r${p#C:/fake}"; fi; echo "$p" ;;
+  *) echo "fake cygpath: unsupported $mode" >&2; exit 2 ;;
+esac

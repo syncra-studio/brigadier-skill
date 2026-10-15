@@ -19,7 +19,7 @@ if [[ -n "$lint" ]]; then
   step shellcheck
   if command -v shellcheck >/dev/null 2>&1; then
     shellcheck -x skills/brigadier/scripts/brig skills/brigadier/scripts/codex-worker skills/brigadier/scripts/backends/*.sh \
-      tests/*.sh tests/fakes/bin/claude tests/fakes/bin/codex tests/fakes/term/cmux tests/fakes/term/tmux tests/fakes/term/faketerm.sh \
+      tests/*.sh tests/fakes/bin/claude tests/fakes/bin/codex tests/fakes/term/cmux tests/fakes/term/tmux tests/fakes/term/faketerm.sh tests/fakes/win/* \
       && echo "  ok    shellcheck clean" || status=1
   else
     echo "  FAIL  shellcheck not installed"; status=1

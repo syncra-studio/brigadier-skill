@@ -189,6 +189,47 @@ out="$(BRIG_CODEX=off brig spawn c03 "$E_DIR/task.md" --agent codex 2>&1)"
 expect_has "codex workers need codex" "$out" "Codex workers need the 'codex' CLI"
 unset BRIG_RUN
 
+echo "== bindings are plain files"
+new_env cmux
+a="$(CMUX_SURFACE_ID=tab-a brig init alpha)"; A="$(run_id_of "$a")"
+check "a binding is a file, not a symlink" test -f "$BRIG_HOME/bindings/cmux-tab-a" -a ! -L "$BRIG_HOME/bindings/cmux-tab-a"
+ln -s "$BRIG_HOME/runs/$A" "$BRIG_HOME/bindings/cmux-legacy"
+expect_has "a symlink binding from an older version still resolves" "$(CMUX_SURFACE_ID=legacy brig run)" "$A"
+CMUX_SURFACE_ID=legacy brig use "$A" >/dev/null
+check "and is rewritten as a file on the next use" test -f "$BRIG_HOME/bindings/cmux-legacy" -a ! -L "$BRIG_HOME/bindings/cmux-legacy"
+expect_has "the rewritten binding resolves" "$(CMUX_SURFACE_ID=legacy brig run)" "$A"
+
+echo "== files written on Windows"
+new_env cmux
+RID="$(run_id_of "$(brig init crlf)")"; export BRIG_RUN="$RID"; R="$BRIG_HOME/runs/$RID"
+printf 'BRIG_CTX_PCT=55\r\nBRIG_MAX_WORKERS=2\r\n' >"$BRIG_HOME/config.env"
+out="$(brig config)"
+expect_has "a CRLF config file loads" "$out" "BRIG_CTX_PCT           55                       user"
+expect_has "without a stray carriage return" "$out" "BRIG_MAX_WORKERS       2                        user"
+expect_has "doctor accepts it" "$(brig doctor 2>&1)" "ok    config $BRIG_HOME/config.env"
+rm -f "$BRIG_HOME/config.env"
+brig spawn w01 "$E_DIR/task.md" >/dev/null 2>&1; brig wait 30 >/dev/null
+printf '\377\376d\000o\000n\000e\000\r\000\n\000' >"$R/workers/w01/status"
+expect_has "a UTF-16 status file from PowerShell reads as its word" "$(brig status)" "w01   live    done"
+brig kill w01 >/dev/null; unset BRIG_RUN
+
+echo "== Windows (Git Bash, simulated)"
+new_env cmux
+export PATH="$TESTS_DIR/fakes/win:$PATH" FAKE_WIN_ROOT="$T_ROOT"
+RID="$(run_id_of "$(brig init win)")"; export BRIG_RUN="$RID"; R="$BRIG_HOME/runs/$RID"
+win="C:/fake${R#"$T_ROOT"}"
+brig spawn w01 "$E_DIR/task.md" >/dev/null 2>&1
+L="$(cat "$R/workers/w01/launch.sh")"
+expect_has "the kickoff names task.md as a Windows path" "$L" "Read\\ $win/workers/w01/task.md"
+expect_has "--settings gets a Windows path" "$L" "--settings $win/workers/w01/settings.json"
+expect_has "the worker gets the brigadier's PATH" "$L" "export PATH="
+expect_has "the protocol shows Windows paths" "$(cat "$R/workers/w01/task.md")" "Your private directory: \`$win/workers/w01\`"
+expect_has "hooks keep the bash path" "$(jq -r '.hooks.Stop[0].hooks[0].command' "$R/workers/w01/settings.json")" "bash $SKILL/scripts/brig _hook stop $R/workers/w01"
+brig kill w01 >/dev/null
+out="$(env -u BRIG_HOME CLAUDE_CONFIG_DIR='C:\fake\cfg' bash "$SKILL/scripts/brig" config 2>&1)"
+expect_has "a Windows-style CLAUDE_CONFIG_DIR is read as a bash path" "$out" "user config: $T_ROOT/cfg/brigadier/config.env"
+unset BRIG_RUN FAKE_WIN_ROOT; export PATH="${PATH#"$TESTS_DIR/fakes/win:"}"
+
 echo "== doctor"
 new_env cmux
 out="$(brig doctor 2>&1)"; code=$?

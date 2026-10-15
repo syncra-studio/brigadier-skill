@@ -15,8 +15,53 @@ BRIG_HOME="${BRIG_HOME:-$CFG_ROOT/brigadier}"
 
 die() { echo "brig: $*" >&2; exit 1; }
 now() { date +%s; }
-readf() { if [[ -f "$1" ]]; then tr -d '\n' <"$1"; else echo "${2:-}"; fi; }
+# One-line control files. CR, NUL and BOM bytes are dropped, so a file written by Notepad or
+# PowerShell (CRLF, UTF-16) still reads as the plain word in it.
+readf() { if [[ -f "$1" ]]; then LC_ALL=C tr -d '\n\r\000\376\377' <"$1"; else echo "${2:-}"; fi; }
 q() { printf '%q' "$1"; }
+
+# ---- Windows (Git Bash, MSYS2, Cygwin) ---------------------------------------------
+# A native jq.exe writes CRLF unless given -b, and every $(jq -r …) would keep the \r.
+# Paths that leave bash (prompts for Claude or Codex, arguments to native programs) go out
+# in mixed form, C:/Users/…, which both Git Bash and Windows programs understand.
+case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*) IS_WINDOWS=1 ;; *) IS_WINDOWS="" ;; esac
+is_windows() { [[ -n "$IS_WINDOWS" ]]; }
+if is_windows; then jq() { command jq -b "$@"; }; fi
+native_path() { if is_windows && command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else printf '%s\n' "$1"; fi; }
+posix_path() { if is_windows && command -v cygpath >/dev/null 2>&1; then cygpath -u "$1"; else printf '%s\n' "$1"; fi; }
+# Where winget and the Claude Code installer put tools. A terminal opened before the install
+# doesn't have them on PATH yet, so setup, doctor and new workers add them themselves.
+win_tool_dirs() {
+  is_windows || return 0
+  local d la="${LOCALAPPDATA:-}" pf="${ProgramFiles:-}" up="${USERPROFILE:-}"
+  for d in "${la:+$la/Microsoft/WinGet/Links}" "${pf:+$pf/WinGet/Links}" "${up:+$up/.local/bin}"; do
+    if [[ -n "$d" && -d "$d" ]]; then posix_path "$d"; fi
+  done
+  if [[ -n "$la" && -d "$la/Microsoft/WinGet/Packages" ]]; then
+    find "$la/Microsoft/WinGet/Packages" -maxdepth 2 -iname 'jq*.exe' 2>/dev/null | while IFS= read -r d; do posix_path "$(dirname "$d")"; done
+  fi
+  true
+}
+# PATH plus any of those dirs it lacks.
+path_with_tools() {
+  local p="$PATH" d
+  while IFS= read -r d; do
+    [[ -n "$d" && ":$p:" != *":$d:"* ]] && p="$p:$d"
+  done < <(win_tool_dirs)
+  printf '%s\n' "$p"
+}
+# jq installed by winget in a terminal that predates the install: find it, under either of its names.
+if is_windows && ! command -v jq >/dev/null 2>&1; then
+  PATH="$(path_with_tools)"
+  if ! command -v jq >/dev/null 2>&1; then
+    JQ_EXE="$(IFS=:; for _d in $PATH; do ls "$_d"/jq-*.exe 2>/dev/null; done | head -1)"
+    if [[ -n "$JQ_EXE" ]]; then jq() { command "$JQ_EXE" -b "$@"; }; fi
+  fi
+fi
+# Source a shell file written by hand, ignoring Windows line endings.
+source_file() { local _src; _src="$(tr -d '\r' <"$1")" || return 1; eval "$_src"; }
+# CLAUDE_CONFIG_DIR may be set the Windows way (C:\Users\…\.claude).
+if is_windows; then CFG_ROOT="$(posix_path "$CFG_ROOT")"; BRIG_HOME="$(posix_path "$BRIG_HOME")"; fi
 abspath() { if [[ "$1" == /* ]]; then echo "$1"; else echo "$PWD/$1"; fi; }
 if stat -c %Y / >/dev/null 2>&1; then
   mtime() { if [[ -e "$1" ]]; then stat -c %Y "$1"; else echo 0; fi; }
@@ -51,10 +96,8 @@ USER_CONFIG="$BRIG_HOME/config.env"
 load_config() {
   local run="${1:-}" k v
   for k in $BRIG_KEYS; do unset "$k"; done
-  # shellcheck disable=SC1090
-  if [[ -f "$USER_CONFIG" ]]; then source "$USER_CONFIG" || die "cannot read $USER_CONFIG"; fi
-  # shellcheck disable=SC1090,SC1091
-  if [[ -n "$run" && -f "$run/config.env" ]]; then source "$run/config.env" || die "cannot read $run/config.env"; fi
+  if [[ -f "$USER_CONFIG" ]]; then source_file "$USER_CONFIG" || die "cannot read $USER_CONFIG"; fi
+  if [[ -n "$run" && -f "$run/config.env" ]]; then source_file "$run/config.env" || die "cannot read $run/config.env"; fi
   for k in $ENV_SET; do v="ENV_$k"; printf -v "$k" '%s' "${!v}"; done
   : "${BRIG_BACKEND:=auto}" "${BRIG_DEFAULT_MODEL:=opus}" "${BRIG_CHORE_MODEL:=sonnet}" "${BRIG_ALLOWED_MODELS:=*}"
   : "${BRIG_DEFAULT_EFFORT:=high}" "${BRIG_MAX_EFFORT:=high}" "${BRIG_MAX_WORKERS:=3}"
@@ -164,9 +207,14 @@ identity() {
   elif [[ -n "${CLAUDE_CODE_SESSION_ID:-}" ]]; then echo "claude-$CLAUDE_CODE_SESSION_ID"
   fi
 }
+# A binding is a one-line file holding the run dir. (Symlinks from older versions are still read;
+# Git Bash's `ln -s` copies instead of linking, so new bindings never use one.)
 bind_identity() {
-  local id; id="$(identity)"; [[ -n "$id" && -z "${BRIG_WORKER:-}" ]] || return 0
-  mkdir -p "$BRIG_HOME/bindings" && ln -sfn "$1" "$BRIG_HOME/bindings/$id"
+  local id p; id="$(identity)"; [[ -n "$id" && -z "${BRIG_WORKER:-}" ]] || return 0
+  p="$BRIG_HOME/bindings/$id"
+  mkdir -p "$BRIG_HOME/bindings" || return 0
+  if [[ -L "$p" ]]; then rm -f "$p"; elif [[ -d "$p" ]]; then rm -rf "$p"; fi
+  printf '%s\n' "$1" >"$p"
 }
 unfinished_runs() {
   local e; [[ -d "$BRIG_HOME/runs" ]] || return 0
@@ -177,7 +225,8 @@ run_dir() {
   if [[ -z "$r" && -n "${BRIG_WORKER_DIR:-}" ]]; then r="$(dirname "$(dirname "$BRIG_WORKER_DIR")")"; fi
   if [[ -z "$r" ]]; then
     id="$(identity)"; p="$BRIG_HOME/bindings/$id"
-    if [[ -n "$id" && -L "$p" ]]; then r="$(readlink "$p")"; fi
+    if [[ -n "$id" && -L "$p" ]]; then r="$(readlink "$p")"
+    elif [[ -n "$id" && -f "$p" ]]; then r="$(readf "$p")"; fi
   fi
   if [[ -z "$r" ]]; then
     local list n; list="$(unfinished_runs)"; n="$(grep -c . <<<"$list" || true)"
@@ -339,8 +388,8 @@ render_protocol() {
   t="$(cat "$SKILL_DIR/worker-protocol.md")"
   if [[ "$BRIG_ALLOWED_MODELS" == "*" ]]; then allowed="any model your Claude Code offers"; else allowed="only these models: $BRIG_ALLOWED_MODELS"; fi
   t="${t//"{{WID}}"/$wid}"
-  t="${t//"{{DIR}}"/$d}"
-  t="${t//"{{REPO}}"/$REPO}"
+  t="${t//"{{DIR}}"/$(native_path "$d")}"
+  t="${t//"{{REPO}}"/$(native_path "$REPO")}"
   t="${t//"{{OTHERS}}"/$others}"
   t="${t//"{{RUN_SLUG}}"/$slug}"
   t="${t//"{{ALLOWED_MODELS}}"/$allowed}"
@@ -393,25 +442,27 @@ cmd_spawn() {
     if (( ${#prev[@]} )); then
       echo; echo "## You are continuing someone else's work"; echo
       echo "Earlier workers ran out of context on this same task. Read their handoffs in order, newest last. The newest one is authoritative:"; echo
-      for p in "${prev[@]}"; do echo "- $RUN/workers/$p/handoff.md"; done
+      for p in "${prev[@]}"; do echo "- $(native_path "$RUN/workers/$p/handoff.md")"; done
       echo; echo "Before touching anything, check the real state with \`git log --oneline -15\` and \`git status\`. Don't redo finished steps and don't repeat any approval step the handoff says already happened. Your own status, report and handoff files live in YOUR private directory above, not in a predecessor's."
     fi
     echo; echo "## Your task"; echo
     cat "$taskf"
   } >"$d/task.md"
   echo "$agent" >"$d/agent"
-  local kickoff="Read $d/task.md and follow it exactly. It holds your whole task and the protocol for this session."
+  local kickoff; kickoff="Read $(native_path "$d/task.md") and follow it exactly. It holds your whole task and the protocol for this session."
 
   {
     echo '#!/usr/bin/env bash'
     echo "# Worker $wid of run $RUN_ID (written by brig spawn)."
     echo "cd $(q "$REPO") || exit 1"
     clean_env_lines
+    # A terminal app on Windows starts its tabs with its own environment, not the brigadier's.
+    if is_windows; then echo "export PATH=$(q "$(path_with_tools)")"; fi
     echo "export BRIG_WORKER=$(q "$wid") BRIG_WORKER_DIR=$(q "$d") BRIG_RUN=$(q "$RUN") BRIG_SKILL_DIR=$(q "$SKILL_DIR")"
     if [[ "$agent" == claude ]]; then
       claude_settings_json "bash $(q "$BRIG_SCRIPT") _hook" "$d" >"$d/settings.json"
       printf 'exec claude --permission-mode %s --disallowedTools AskUserQuestion EnterPlanMode ExitPlanMode' "$(q "$BRIG_PERMISSION_MODE")"
-      printf ' --settings %s --name %s --model %s --effort %s' "$(q "$d/settings.json")" "$(q "$wid${title:+ · $title}")" "$(q "$model")" "$(q "$effort")"
+      printf ' --settings %s --name %s --model %s --effort %s' "$(q "$(native_path "$d/settings.json")")" "$(q "$wid${title:+ · $title}")" "$(q "$model")" "$(q "$effort")"
       printf ' %s\n' "$(q "$kickoff")"
     else
       echo "exec bash $(q "$SKILL_DIR/scripts/codex-worker") $(q "$d") $(q "$REPO") $(q "$effort") $(q "$kickoff") $(q "$model") $(q "$BRIG_PERMISSION_MODE")"
@@ -495,7 +546,7 @@ cmd_rebirth() {
   check_permission_mode
   local model; model="$(claude_model "")"
   local prompt="${SLASH:-/brigadier} resume $RUN_ID"
-  [[ -n "$note" ]] && prompt+=". First read $note: it is the previous brigadier's note to you."
+  [[ -n "$note" ]] && prompt+=". First read $(native_path "$(abspath "$note")"): it is the previous brigadier's note to you."
   local skip=false; [[ "$BRIG_PERMISSION_MODE" == bypassPermissions ]] && skip=true
   jq -n --argjson skip "$skip" '{skipDangerousModePermissionPrompt: $skip}' >"$RUN/rebirth-settings.json"
   {
@@ -503,9 +554,10 @@ cmd_rebirth() {
     echo "# Fresh brigadier for run $RUN_ID (written by brig rebirth)."
     echo "cd $(q "$REPO") || exit 1"
     clean_env_lines
+    if is_windows; then echo "export PATH=$(q "$(path_with_tools)")"; fi
     echo "export BRIG_RUN=$(q "$RUN")"
     printf 'exec claude --permission-mode %s --settings %s --model %s --effort %s --name %s %s\n' \
-      "$(q "$BRIG_PERMISSION_MODE")" "$(q "$RUN/rebirth-settings.json")" "$(q "$model")" "$(q "$BRIG_DEFAULT_EFFORT")" \
+      "$(q "$BRIG_PERMISSION_MODE")" "$(q "$(native_path "$RUN/rebirth-settings.json")")" "$(q "$model")" "$(q "$BRIG_DEFAULT_EFFORT")" \
       "$(q "Brigadier · ${RUN_ID#*-*-}")" "$(q "$prompt")"
   } >"$RUN/rebirth.sh"
   chmod +x "$RUN/rebirth.sh"
@@ -797,8 +849,7 @@ cmd_doctor() {
   fi
   if mkdir -p "$BRIG_HOME" 2>/dev/null && [[ -w "$BRIG_HOME" ]]; then ok "state dir $BRIG_HOME"; else no "cannot write $BRIG_HOME (set BRIG_HOME to a writable dir)"; fi
   if [[ -f "$USER_CONFIG" ]]; then
-    # shellcheck disable=SC1090
-    if (set +u; source "$USER_CONFIG") >/dev/null 2>&1; then ok "config $USER_CONFIG"; else no "config $USER_CONFIG has a shell syntax error"; fi
+    if (set +u; source_file "$USER_CONFIG") >/dev/null 2>&1; then ok "config $USER_CONFIG"; else no "config $USER_CONFIG has a shell syntax error"; fi
   else warn "no config file yet; defaults apply (cp $SKILL_DIR/config.example.env $USER_CONFIG to change them)"; fi
   if (( $(effort_rank "$BRIG_MAX_EFFORT") == 0 )); then no "BRIG_MAX_EFFORT=$BRIG_MAX_EFFORT is not low|medium|high|xhigh|max"
   elif (( $(effort_rank "$BRIG_DEFAULT_EFFORT") == 0 || $(effort_rank "$BRIG_DEFAULT_EFFORT") > $(effort_rank "$BRIG_MAX_EFFORT") )); then
