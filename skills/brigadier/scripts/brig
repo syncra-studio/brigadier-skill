@@ -248,27 +248,53 @@ pick_backend() {
   case "$BRIG_BACKEND" in
     auto)
       if [[ -n "${CMUX_WORKSPACE_ID:-}" ]] && command -v cmux >/dev/null 2>&1; then echo cmux
-      elif [[ -n "${WMUX_SURFACE_ID:-}" ]] && command -v wmux >/dev/null 2>&1; then echo wmux
+      elif [[ "$(wmux_flavor)" == amirlehmam ]] && command -v wmux >/dev/null 2>&1; then echo wmux
+      elif [[ "$(wmux_flavor)" == openwong2kim ]] && command -v powershell.exe >/dev/null 2>&1; then echo wmux-ow
       elif command -v tmux >/dev/null 2>&1; then echo tmux
       else return 1; fi ;;
     *) echo "$BRIG_BACKEND" ;;
   esac
 }
+# Two unrelated Windows apps are called wmux, and both are supported:
+#   amirlehmam/wmux   (backend wmux, recommended)  sets WMUX=1, WMUX_SURFACE_ID, WMUX_CLI, WMUX_PIPE
+#   openwong2kim/wmux (backend wmux-ow, fallback)   sets WMUX_PTY_ID, WMUX_WORKSPACE_ID, TERM_PROGRAM=wmux
+# openwong2kim may set WMUX_SURFACE_ID too, so amirlehmam is recognised by its own variables.
+# If both look present, amirlehmam wins.
+wmux_flavor() {
+  if [[ -n "${WMUX_SURFACE_ID:-}" && ( "${WMUX:-}" == 1 || -n "${WMUX_CLI:-}${WMUX_PIPE:-}" ) ]]; then echo amirlehmam
+  elif [[ -n "${WMUX_PTY_ID:-}" || "${TERM_PROGRAM:-}" == wmux ]]; then echo openwong2kim
+  fi
+}
 WMUX_RELEASES="https://github.com/amirlehmam/wmux/releases/latest"
 WMUX_TESTED="2.24.0"
+WMUX_OW_TESTED="4.5.0"
+WMUX_OW_WINGET="winget install --id openwong2kim.wmux -e --source winget"
 no_terminal_msg() {
   if ! is_windows; then
     echo "Brigadier needs cmux or tmux to run workers, and neither is available. $(install_hint tmux) — then run /brigadier again from any terminal; it starts tmux in the background for you."
-  elif [[ -n "${WMUX_PTY_ID:-}" && -z "${WMUX_SURFACE_ID:-}" ]]; then
-    echo "This terminal is openwong2kim/wmux, which Brigadier doesn't support (its CLI can't start a command in a new tab or list every tab). Install amirlehmam/wmux instead: $(wmux_install_steps)"
-  elif [[ -n "${WMUX_SURFACE_ID:-}" ]]; then
-    echo "This is a wmux tab, but the 'wmux' command isn't on PATH. Close this tab, open a new one in wmux and start Claude Code there."
-  else
-    echo "On Windows, Brigadier runs its workers in wmux (tabs, like cmux on macOS), and this isn't a wmux tab. $(wmux_install_steps)"
+    return
   fi
+  case "$(wmux_flavor)" in
+    amirlehmam) echo "This is a wmux tab, but the 'wmux' command isn't on PATH. Close this tab, open a new one in wmux and start Claude Code there." ;;
+    openwong2kim) printf '%s\n' "This is an openwong2kim/wmux tab, but powershell.exe isn't on PATH (Brigadier talks to this wmux through it). Add C:\\Windows\\System32\\WindowsPowerShell\\v1.0 to PATH, or use amirlehmam/wmux: $(wmux_install_steps)" ;;
+    *) echo "On Windows, Brigadier runs its workers in wmux (tabs, like cmux on macOS), and this isn't a wmux tab. $(wmux_install_steps)" ;;
+  esac
 }
 wmux_install_steps() {
-  echo "If wmux isn't installed: download wmux-<version>-setup.exe from $WMUX_RELEASES (tested with $WMUX_TESTED) and run it. Then open wmux, start Claude Code in a wmux tab, and run /brigadier setup there."
+  echo "Recommended: amirlehmam/wmux. Download wmux-<version>-setup.exe from $WMUX_RELEASES (tested with $WMUX_TESTED) and run it. Alternative: openwong2kim/wmux, with: $WMUX_OW_WINGET. Then open wmux, start Claude Code in a wmux tab, and run /brigadier setup there."
+}
+# One line on the wmux in use, for doctor: which project, its version, and what it can't do.
+wmux_doctor_line() {
+  local v
+  case "$1" in
+    wmux)
+      v="$(wmux identify 2>/dev/null | jq -r '.version // empty' 2>/dev/null || true)"
+      echo "terminal: wmux (amirlehmam/wmux ${v:-version unknown}, tab $WMUX_SURFACE_ID; tested with $WMUX_TESTED)" ;;
+    wmux-ow)
+      load_backend wmux-ow
+      v="$(ow_rpc system.identify '{}' 2>/dev/null | jq -r '.version // empty' 2>/dev/null || true)"
+      echo "terminal: wmux-ow (openwong2kim/wmux ${v:-version unknown: its pipe did not answer}, pane $WMUX_PTY_ID; tested with $WMUX_OW_TESTED). The fallback: tabs keep wmux's own titles, the sidebar status may not clear, and only tabs in this workspace are tracked" ;;
+  esac
 }
 
 # ---- runs -----------------------------------------------------------------------
@@ -280,6 +306,7 @@ wmux_install_steps() {
 identity() {
   if [[ -n "${CMUX_SURFACE_ID:-}" ]]; then echo "cmux-$CMUX_SURFACE_ID"
   elif [[ -n "${WMUX_SURFACE_ID:-}" ]]; then echo "wmux-$WMUX_SURFACE_ID"
+  elif [[ -n "${WMUX_PTY_ID:-}" ]]; then echo "wmuxow-$WMUX_PTY_ID"
   elif [[ -n "${TMUX:-}" && -n "${TMUX_PANE:-}" ]]; then echo "tmux-$(cut -d, -f2 <<<"$TMUX")-${TMUX_PANE#%}"
   elif [[ -n "${CLAUDE_CODE_SESSION_ID:-}" ]]; then echo "claude-$CLAUDE_CODE_SESSION_ID"
   fi
@@ -964,8 +991,11 @@ cmd_doctor() {
       if [[ -n "${CMUX_WORKSPACE_ID:-}" ]] && command -v cmux >/dev/null 2>&1; then ok "terminal: cmux (workspace $CMUX_WORKSPACE_ID)"
       else no "BRIG_BACKEND=cmux but this isn't a cmux terminal (or cmux isn't on PATH)"; fi
     elif [[ "$b" == wmux ]]; then
-      if [[ -n "${WMUX_SURFACE_ID:-}" ]] && command -v wmux >/dev/null 2>&1; then ok "terminal: wmux (tab $WMUX_SURFACE_ID; Brigadier is tested with wmux $WMUX_TESTED)"
-      else no "BRIG_BACKEND=wmux, but this isn't a wmux tab with the wmux CLI on PATH. $(wmux_install_steps)"; fi
+      if [[ "$(wmux_flavor)" == amirlehmam ]] && command -v wmux >/dev/null 2>&1; then ok "$(wmux_doctor_line wmux)"
+      else no "BRIG_BACKEND=wmux (amirlehmam/wmux), but this isn't one of its tabs with the wmux CLI on PATH. $(wmux_install_steps)"; fi
+    elif [[ "$b" == wmux-ow ]]; then
+      if [[ -n "${WMUX_PTY_ID:-}" ]] && command -v powershell.exe >/dev/null 2>&1; then ok "$(wmux_doctor_line wmux-ow)"
+      else no "BRIG_BACKEND=wmux-ow (openwong2kim/wmux), but this isn't one of its tabs, or powershell.exe isn't on PATH. $(wmux_install_steps)"; fi
     elif [[ "$b" == tmux ]]; then
       if ! command -v tmux >/dev/null 2>&1; then no "tmux not found. $(install_hint tmux)"
       elif [[ -n "${TMUX:-}" && "$BRIG_TMUX_MODE" != background ]]; then ok "terminal: tmux $(tmux -V | cut -d' ' -f2), attached (workers open as windows in this session)"
@@ -989,21 +1019,22 @@ cmd_doctor() {
   if (( bad == 0 )); then echo "all good"; else echo "fix the FAIL lines first (/brigadier setup prints the exact commands)"; return 1; fi
 }
 
-# brig setup [--install [--yes]]: everything a new machine needs, then doctor.
+# brig setup [--install [--yes] [--wmux-ow]]: everything a new machine needs, then doctor.
 # Prints the exact install command for anything missing; runs package-manager installs only with
 # --install, after a yes on a terminal or --yes (which the skill passes only after the user agreed
 # in chat to the commands shown). Never overwrites a file. Safe to run again.
 cmd_setup() {
-  local install="" yes="" a
+  local install="" yes="" ow="" a
   for a in "$@"; do
     case "$a" in
       --install) install=1 ;;
       --yes) yes=1 ;;
-      *) die "usage: brig setup [--install [--yes]]" ;;
+      --wmux-ow) ow=1 ;;
+      *) die "usage: brig setup [--install [--yes] [--wmux-ow]]" ;;
     esac
   done
   [[ -z "${BRIG_WORKER:-}" ]] || die "workers don't run setup"
-  local os pkgs=() manual=() cmds=() line
+  local os pkgs=() manual=() cmds=() line wmux_alt=""
   os="$(os_kind)"
   if is_windows; then PATH="$(path_with_tools)"; fi
   item() { printf '  %-8s %s\n' "$1" "$2"; }
@@ -1024,8 +1055,13 @@ cmd_setup() {
   done
   if command -v claude >/dev/null 2>&1; then item ok claude; else item missing "claude: $(claude_install_hint)"; manual+=("claude: $(claude_install_hint)"); fi
   if [[ "$os" == windows ]]; then
-    if [[ -n "${WMUX_SURFACE_ID:-}" ]] && command -v wmux >/dev/null 2>&1; then item ok "wmux (this tab)"
-    else item missing "wmux: $(no_terminal_msg)"; manual+=("wmux: $(no_terminal_msg)"); fi
+    if [[ "$(wmux_flavor)" == amirlehmam ]] && command -v wmux >/dev/null 2>&1; then item ok "wmux (this tab, amirlehmam/wmux)"
+    elif [[ "$(wmux_flavor)" == openwong2kim ]] && command -v powershell.exe >/dev/null 2>&1; then item ok "wmux (this tab, openwong2kim/wmux: supported as the fallback)"
+    else
+      item missing "wmux: $(no_terminal_msg)"; manual+=("wmux: $(no_terminal_msg)")
+      # The alternative is a package-manager install, so it may run with --install like the others.
+      if [[ -z "$(wmux_flavor)" ]] && command -v winget >/dev/null 2>&1; then wmux_alt="$WMUX_OW_WINGET"; fi
+    fi
   elif [[ -n "${CMUX_WORKSPACE_ID:-}" ]] && command -v cmux >/dev/null 2>&1; then item ok "cmux (this workspace)"
   elif command -v tmux >/dev/null 2>&1; then item ok tmux
   else item missing tmux; pkgs+=(tmux); fi
@@ -1062,11 +1098,15 @@ cmd_setup() {
       manual+=("winget (App Installer, from the Microsoft Store) is needed for: $c")
     else cmds+=("$c"); fi
   fi
+  if [[ -n "$wmux_alt" ]]; then cmds+=("$wmux_alt"); fi
 
   if (( ${#cmds[@]} + ${#manual[@]} )); then
     echo "to do:"
-    for c in ${cmds[@]+"${cmds[@]}"}; do echo "  run:  $c"; done
     for c in ${manual[@]+"${manual[@]}"}; do echo "  by hand: $c"; done
+    for c in ${cmds[@]+"${cmds[@]}"}; do
+      if [[ "$c" == "$wmux_alt" ]]; then echo "  run:  $c   (only if you choose openwong2kim/wmux over amirlehmam/wmux; setup runs it with --install --wmux-ow)"
+      else echo "  run:  $c"; fi
+    done
   fi
   if (( ${#cmds[@]} )); then
     if [[ -z "$install" ]]; then
@@ -1078,6 +1118,7 @@ cmd_setup() {
       else echo "Not installing: there's no terminal to confirm in. Review the commands above, then run 'brig setup --install --yes'."; fi
       if [[ -n "$go" ]]; then
         for c in "${cmds[@]}"; do
+          if [[ "$c" == "$wmux_alt" && -z "$ow" ]]; then echo "  skipped: $c (add --wmux-ow to install openwong2kim/wmux)"; continue; fi
           if [[ "$c" == sudo\ * && ! -t 0 ]] && ! sudo -n true 2>/dev/null; then
             echo "  needs your password, so run it yourself (in Claude Code: ! $c)"; continue
           fi
@@ -1104,7 +1145,7 @@ cmd_version() { echo "brig $BRIG_VERSION"; }
 cmd_help() {
   cat <<EOF
 brig $BRIG_VERSION: Brigadier worker control (runs live in $BRIG_HOME/runs)
-  setup [--install [--yes]]       set this machine up (prints install commands; runs them only with --install), then doctor
+  setup [--install [--yes] [--wmux-ow]]  set this machine up (prints install commands; runs them only with --install), then doctor
   doctor                          check this machine (terminal backend, claude, codex, jq, config)
   config                          effective settings and where each comes from
   init <slug> [--slash CMD]       new run in this repo; prints BRIG_RUN=<run-id> (pass it on every later call)

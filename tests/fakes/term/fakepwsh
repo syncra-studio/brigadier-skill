@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# A fake PowerShell tab for the fake openwong2kim/wmux: shows a prompt, then runs the one line
+# typed into it, which must be the backend's  & '<bash.exe>' '<script>'; exit
+printf 'PS %s> ' "$PWD"
+IFS= read -r line || exit 0
+re="^& '(([^']|'')*)' '(([^']|'')*)'; exit$"
+[[ "$line" =~ $re ]] || { echo "fakepwsh: unexpected input: $line"; exit 1; }
+sq="'"; exe="${BASH_REMATCH[1]//$sq$sq/$sq}"; script="${BASH_REMATCH[3]//$sq$sq/$sq}"
+echo
+"$exe" "$script"
+exit 0

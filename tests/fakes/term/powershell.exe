@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# Fake powershell.exe for the test suite: plays openwong2kim/wmux's RPC pipe for the wmux-ow
+# backend. It reads the request the backend puts in WMUXOW_REQ and answers with one JSON line.
+# shellcheck source=tests/fakes/term/faketerm.sh
+source "$(dirname "${BASH_SOURCE[0]}")/faketerm.sh"
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+[[ "${1:-}" == -NoProfile && "${2:-}" == -NonInteractive && "${3:-}" == -Command ]] \
+  || { echo "fake powershell: unexpected arguments: $*" >&2; exit 2; }
+[[ "${4:-}" == *NamedPipeClientStream* ]] || { echo "fake powershell: not the pipe script" >&2; exit 2; }
+[[ "${WMUXOW_PIPE:-}" == "wmux${WMUX_DATA_SUFFIX:-}-${USERNAME:-}" ]] \
+  || { echo "cannot reach the wmux pipe ${WMUXOW_PIPE:-}" >&2; exit 3; }
+
+req="${WMUXOW_REQ:?}"; id="$(jq -r .id <<<"$req")"; m="$(jq -r .method <<<"$req")"
+P() { jq -r --arg k "$1" '.params[$k] // empty' <<<"$req"; }
+ft_log "wmux-ow $m $(jq -c .params <<<"$req")"
+ok() { jq -cn --arg id "$id" --argjson r "$1" '{id: $id, ok: true, result: $r}'; }
+err() { jq -cn --arg id "$id" --arg e "$1" '{id: $id, ok: false, error: $e}'; }
+[[ "$(jq -r .clientName <<<"$req")" == wmux-cli ]] || { err "permission denied"; exit 0; }
+tok="$(cat "${USERPROFILE:-/nonexistent}/.wmux-auth-token" 2>/dev/null)"
+[[ -n "$tok" && "$(jq -r .token <<<"$req")" == "$tok" ]] \
+  || { err "Unauthorized"; exit 0; }
+WS="ws-test"
+mkdir -p "$FAKE_TERM_DIR/ow"
+case "$m" in
+  system.identify) ok '{"app":"wmux","version":"4.5.0-fake","platform":"win32"}' ;;
+  workspace.current) ok "$(jq -cn --arg w "$WS" '{id: $w, name: "test"}')" ;;
+  surface.new)
+    [[ "$(P shell)" == powershell.exe ]] || { err "fake: expected shell powershell.exe"; exit 0; }
+    ws="$(P workspaceId)"; cwd="$(P cwd)"
+    [[ "$ws" == "$WS" ]] || { err "surface.new: workspace \"$ws\" not found"; exit 0; }
+    n="$(ft_next)"; sid="osurf-$n"; pty="opty-$n"
+    echo "$pty" >"$FAKE_TERM_DIR/ow/$sid"; echo "$sid" >"$FAKE_TERM_DIR/ow/$pty"
+    ft_spawn "$pty" "$cwd" "WMUX_PTY_ID=$(printf %q "$pty") bash $(printf %q "$here/fakepwsh")" "$ws"
+    ok "$(jq -cn --arg s "$sid" --arg p "$pty" --arg c "$cwd" '{id: $s, ptyId: $p, title: "powershell", shell: "powershell.exe", cwd: $c}')" ;;
+  surface.list)
+    ws="$(P workspaceId)"; ws="${ws:-$WS}"
+    {
+      if [[ "$ws" == "$WS" && -n "${WMUX_PTY_ID:-}" && ! -e "$FAKE_TERM_DIR/ow/closed-${WMUX_PTY_ID}" ]]; then
+        jq -cn --arg p "$WMUX_PTY_ID" '{id: ("osurf-self-" + $p), ptyId: $p}'
+      fi
+      for pty in $(ft_group_ids "$ws"); do
+        if ft_alive "$pty"; then jq -cn --arg s "$(cat "$FAKE_TERM_DIR/ow/$pty")" --arg p "$pty" '{id: $s, ptyId: $p}'; fi
+      done
+    } | jq -sc . | { read -r a; ok "$a"; } ;;
+  input.send) if ft_type "$(P ptyId)" "$(P text)"; then ok '{"ok":true}'; else err "input.send: no such pty"; fi ;;
+  input.sendKey)
+    [[ "$(P key)" == enter ]] || { err "fake: only enter"; exit 0; }
+    if ft_enter "$(P ptyId)"; then ok '{"ok":true}'; else err "input.sendKey: no such pty"; fi ;;
+  input.readScreen)
+    t="$(ft_read "$(P ptyId)" "$(P tail_lines)")" || { err "input.readScreen: no such pty"; exit 0; }
+    ok "$(jq -cn --arg t "$t" --arg p "$(P ptyId)" '{text: $t, ptyId: $p}')" ;;
+  surface.close)
+    sid="$(P id)"
+    if [[ "$sid" == osurf-self-* ]]; then touch "$FAKE_TERM_DIR/ow/closed-${sid#osurf-self-}"
+    elif [[ -f "$FAKE_TERM_DIR/ow/$sid" ]]; then ft_close "$(cat "$FAKE_TERM_DIR/ow/$sid")"; fi
+    ok '{"ok":true}' ;;
+  surface.focus|notify|meta.setStatus) ok '{"ok":true}' ;;
+  *) err "Method not found: $m" ;;
+esac

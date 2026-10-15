@@ -179,6 +179,55 @@ brig finish "done" >/dev/null
 expect_has "finish clears the sidebar status" "$(tail -3 "$FAKE_TERM_DIR/log")" "wmux set-status --workspace ws-test --state idle"
 unset BRIG_RUN
 
+echo "== wmux-ow (openwong2kim/wmux): pipe calls, focus and rebirth"
+new_env wmux-ow
+RID="$(run_id_of "$(brig init ow)")"; export BRIG_RUN="$RID"; R="$BRIG_HOME/runs/$RID"
+fake_mode w01 ask
+brig spawn w01 "$E_DIR/task.md" --title "lead" >/dev/null
+out="$(brig wait 30)"; expect_has "a worker runs in an openwong2kim tab" "$out" "TURN_END w01 status=working"
+sid="$(surface_of w01)"; L="$(cat "$FAKE_TERM_DIR/log")"
+expect_has "the id pairs the surface and the pty" "$sid" "osurf-"
+expect_has "the tab opens in this workspace and the repo, in PowerShell" "$L" "wmux-ow surface.new {\"workspaceId\":\"ws-test\",\"cwd\":\"$E_DIR/repo\",\"shell\":\"powershell.exe\"}"
+expect_has "the command is typed into it" "$L" "wmux-ow input.send {\"ptyId\":\"${sid#*@}\",\"workspaceId\":\"ws-test\",\"text\":\"& '$BASH' '$R/workers/w01/launch.sh'; exit\"}"
+expect_has "then Enter" "$L" "wmux-ow input.sendKey {\"ptyId\":\"${sid#*@}\""
+expect_has "then focus goes back to the brigadier's tab" "$L" "wmux-ow surface.focus {\"id\":\"osurf-self-$WMUX_PTY_ID\"}"
+sleep 1
+# shellcheck disable=SC2016 # the $ is meant literally
+brig send w01 'it'"'"'s "quoted" & $literal' >/dev/null
+out="$(brig wait 30)"; expect_has "text reaches the worker unchanged" "$out" "ack: it's \"quoted\" & \$literal"
+expect_has "screen reads come back as text" "$(brig screen w01 5)" "ack: it's"
+brig kill w01 >/dev/null
+check "kill closes the surface" grep -q "wmux-ow surface.close {\"id\":\"${sid%@*}\"}" "$FAKE_TERM_DIR/log"
+fake_mode successor ack
+out="$(BRIG_REBIRTH_TIMEOUT=20 brig rebirth 2>&1)"
+expect_has "a wmux-ow rebirth confirms" "$out" "REBIRTH_OK"
+check "and the old tab closes itself after the ack" wait_for 10 grep -q "wmux-ow surface.close {\"id\":\"osurf-self-$WMUX_PTY_ID\"}" "$FAKE_TERM_DIR/log"
+brig kill successor >/dev/null
+brig finish "done" >/dev/null
+unset BRIG_RUN
+rm -f "$USERPROFILE/.wmux-auth-token"
+out="$(brig init badtoken 2>&1)"
+expect_has "a pipe that refuses the token is explained" "$out" "openwong2kim/wmux's pipe (wmux-tester) didn't answer"
+
+echo "== which wmux"
+new_env wmux-ow
+export WMUX=1 WMUX_SURFACE_ID=surf-both
+expect_has "both look present: amirlehmam wins" "$(brig doctor 2>&1)" "terminal: wmux (amirlehmam/wmux"
+unset WMUX
+expect_has "WMUX_SURFACE_ID alone doesn't make it amirlehmam" "$(brig doctor 2>&1)" "terminal: wmux-ow (openwong2kim/wmux"
+new_env wmux-ow
+out="$(brig doctor 2>&1)"; code=$?
+expect_has "doctor names openwong2kim/wmux and its version" "$out" "ok    terminal: wmux-ow (openwong2kim/wmux 4.5.0-fake, pane opty-self-"
+expect_has "and what the fallback can't do" "$out" "tabs keep wmux's own titles"
+check "and passes" test "$code" -eq 0
+out="$(BRIG_BACKEND=wmux brig doctor 2>&1)"
+expect_has "BRIG_BACKEND=wmux inside openwong2kim is refused" "$out" "BRIG_BACKEND=wmux (amirlehmam/wmux), but this isn't one of its tabs"
+new_env wmux
+out="$(brig doctor 2>&1)"
+expect_has "doctor names amirlehmam/wmux and its version" "$out" "ok    terminal: wmux (amirlehmam/wmux 2.24.0-fake, tab surf-self-"
+out="$(BRIG_BACKEND=wmux-ow brig doctor 2>&1)"
+expect_has "BRIG_BACKEND=wmux-ow outside openwong2kim is refused" "$out" "BRIG_BACKEND=wmux-ow (openwong2kim/wmux), but this isn't one of its tabs"
+
 echo "== resuming a finished background run"
 new_env tmux-bg
 RID="$(run_id_of "$(brig init again)")"; export BRIG_RUN="$RID"
@@ -339,7 +388,7 @@ out="$(BRIG_DEFAULT_EFFORT=max brig doctor 2>&1)"
 expect_has "doctor checks the effort settings" "$out" "BRIG_DEFAULT_EFFORT=max must be"
 new_env wmux
 out="$(brig doctor 2>&1)"; code=$?
-expect_has "doctor finds wmux inside a wmux tab" "$out" "ok    terminal: wmux (tab surf-self-"
+expect_has "doctor finds wmux inside a wmux tab" "$out" "ok    terminal: wmux (amirlehmam/wmux 2.24.0-fake, tab surf-self-"
 check "and passes" test "$code" -eq 0
 # Windows without tmux, cmux or wmux on PATH.
 new_env tmux-bg
@@ -352,9 +401,10 @@ out="$(PATH="$wb" brig doctor 2>&1)"
 expect_has "on Windows outside wmux, doctor says to use wmux" "$out" "FAIL  no terminal backend: On Windows, Brigadier runs its workers in wmux"
 expect_has "with where to get it" "$out" "https://github.com/amirlehmam/wmux/releases/latest"
 expect_not "and no tmux advice" "$out" "install tmux"
+expect_has "with openwong2kim/wmux as the alternative" "$out" "Alternative: openwong2kim/wmux, with: winget install --id openwong2kim.wmux -e --source winget"
 out="$(PATH="$wb" WMUX_PTY_ID=pty-1 TERM_PROGRAM=wmux brig doctor 2>&1)"
-expect_has "the other wmux is named as unsupported" "$out" "openwong2kim/wmux, which Brigadier doesn't support"
-out="$(PATH="$wb" WMUX_SURFACE_ID=surf-1 brig init x 2>&1)"
+expect_has "an openwong2kim tab without powershell.exe is explained" "$out" "This is an openwong2kim/wmux tab, but powershell.exe isn't on PATH"
+out="$(PATH="$wb" WMUX=1 WMUX_SURFACE_ID=surf-1 brig init x 2>&1)"
 expect_has "a wmux tab without the CLI is explained" "$out" "the 'wmux' command isn't on PATH"
 
 echo "== installed copy without exec bits"

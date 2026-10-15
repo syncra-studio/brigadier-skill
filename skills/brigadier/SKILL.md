@@ -39,7 +39,8 @@ Run state lives outside the repo, in `~/.claude/brigadier/runs/<run-id>/`: `goal
 - `brig` fails with `$'\r': command not found` or `invalid option name` (the skill was checked out with Windows line endings): run `sed -i 's/\r$//' "${CLAUDE_SKILL_DIR}/scripts/brig"`, then continue with setup below, which fixes the other files.
 
 If `$ARGUMENTS` is `setup`, run `brig setup` and show its output. The user is at the keyboard for this, so here, and only here, you ask them something:
-- `run:` lines are install commands setup didn't run. Show them exactly as printed and ask whether to run them. If the user says yes, run `brig setup --install --yes` and show its output. A command that "needs your password" is one the user types themselves, prefixed with `!`.
+- `run:` lines are install commands setup didn't run. Show them exactly as printed and ask whether to run them. If the user says yes, run `brig setup --install --yes` and show its output.
+- On Windows without wmux, setup recommends amirlehmam/wmux (installed by hand) and offers openwong2kim/wmux through winget as the alternative. Ask which one they want. Only if they choose openwong2kim/wmux, add `--wmux-ow` to the install command. A command that "needs your password" is one the user types themselves, prefixed with `!`.
 - `by hand:` lines are steps only the user can do (installing wmux, restarting a terminal). Show them as they are.
 - Stop after that. Setup ends with doctor's report.
 

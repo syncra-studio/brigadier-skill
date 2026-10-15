@@ -12,6 +12,7 @@ opt() { # opt <name> <args...>: value after --name
 WS="ws-test"
 
 case "$sub" in
+  identify) echo '{"name":"wmux","version":"2.24.0-fake","platform":"win32"}' ;;
   whoami) jq -cn --arg w "$WS" --arg s "${WMUX_SURFACE_ID:-}" '{id: $w, title: "test", surfaceId: $s}' ;;
   list-workspaces) jq -cn --arg w "$WS" '{workspaces: [{id: $w, isActive: true}, {id: "ws-empty", isActive: false}]}' ;;
   list-surfaces)

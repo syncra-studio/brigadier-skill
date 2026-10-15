@@ -94,14 +94,27 @@ expect_has "and how to get wmux" "$out" "by hand: wmux: On Windows, Brigadier ru
 expect_has "with its release page" "$out" "https://github.com/amirlehmam/wmux/releases/latest"
 expect_not "never suggests tmux" "$out" "tmux"
 expect_not "never offers to download wmux" "$out" "curl"
+expect_has "recommends amirlehmam/wmux first" "$out" "by hand: wmux: On Windows, Brigadier runs its workers in wmux (tabs, like cmux on macOS), and this isn't a wmux tab. Recommended: amirlehmam/wmux."
+expect_has "offers openwong2kim/wmux through winget as the alternative" "$out" "run:  winget install --id openwong2kim.wmux -e --source winget   (only if you choose openwong2kim/wmux over amirlehmam/wmux"
+check "the recommendation comes before the alternative" bash -c "grep -n . <<<\"\$1\" | grep -m1 -E 'amirlehmam|openwong2kim' | grep -q amirlehmam" _ "$out"
 out="$(brig setup --install --yes </dev/null 2>&1)"
 expect_has "runs winget" "$(cat "$FAKE_LOG")" "winget install --id jqlang.jq -e --source winget"
+expect_not "but never picks the alternative wmux by itself" "$(cat "$FAKE_LOG")" "openwong2kim.wmux"
+expect_has "and says how to" "$out" "skipped: winget install --id openwong2kim.wmux -e --source winget (add --wmux-ow"
+brig setup --install --yes --wmux-ow </dev/null >/dev/null 2>&1
+expect_has "--wmux-ow installs it" "$(cat "$FAKE_LOG")" "winget install --id openwong2kim.wmux -e --source winget"
 expect_has "and finds jq where winget put it, though PATH doesn't have it yet" "$out" "ok    jq"
 expect_has "doctor still wants wmux" "$out" "FAIL  no terminal backend: On Windows"
-out="$(PATH="$TESTS_DIR/fakes/term:$PATH" WMUX_SURFACE_ID=surf-me brig setup </dev/null 2>&1)"; code=$?
-expect_has "inside wmux everything passes" "$out" "ok       wmux (this tab)"
+out="$(PATH="$TESTS_DIR/fakes/term:$PATH" WMUX=1 WMUX_SURFACE_ID=surf-me brig setup </dev/null 2>&1)"; code=$?
+expect_has "inside wmux everything passes" "$out" "ok       wmux (this tab, amirlehmam/wmux)"
 expect_has "doctor too" "$out" "all good"
 check "exit 0" test "$code" -eq 0
+expect_not "no wmux to install from a wmux tab" "$out" "openwong2kim.wmux"
+mkdir -p "$E_DIR/up"; printf 'tok\n' >"$E_DIR/up/.wmux-auth-token"
+out="$(PATH="$TESTS_DIR/fakes/term:$PATH" WMUX_PTY_ID=pty-me WMUX_WORKSPACE_ID=ws-test TERM_PROGRAM=wmux USERNAME=tester USERPROFILE="$E_DIR/up" brig setup </dev/null 2>&1)"; code=$?
+expect_has "inside openwong2kim/wmux too" "$out" "ok       wmux (this tab, openwong2kim/wmux: supported as the fallback)"
+expect_has "and doctor names it" "$out" "terminal: wmux-ow (openwong2kim/wmux 4.5.0-fake"
+check "exit 0 there too" test "$code" -eq 0
 setup_env; only_fakes "$E_DIR/os" winget; PATH="$TESTS_DIR/fakes/win:$E_DIR/os:$PATH"
 export LOCALAPPDATA="$E_DIR/la" FAKE_WINGET_DIR="$E_DIR/somewhere-else"
 out="$(brig setup --install --yes </dev/null 2>&1)"

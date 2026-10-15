@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # The full worker lifecycle against every terminal backend, through brig's backend interface.
-# usage: bash tests/test_backends.sh [cmux] [wmux] [tmux-bg] [tmux-attached]   (default: all four)
+# usage: bash tests/test_backends.sh [cmux] [wmux] [wmux-ow] [tmux-bg] [tmux-attached]   (default: all five)
 # shellcheck source=tests/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 # The fake terminals share one state dir, so the fake cmux can list and close any surface.
-fake_gone() { ! bash "$TESTS_DIR/fakes/term/cmux" tree | grep -qF "\"$1\""; }
+# A wmux-ow id is <surface>@<pty>; the fake terminal knows the pty.
+fake_gone() { ! bash "$TESTS_DIR/fakes/term/cmux" tree | grep -qF "\"${1#*@}\""; }
 
 lifecycle() {
   local kind="$1" out
@@ -21,6 +22,10 @@ lifecycle() {
       expect_has "run.env records wmux" "$(cat "$R/run.env")" "BACKEND=wmux"
       expect_has "run.env records the workspace from whoami" "$(cat "$R/run.env")" "WORKSPACE=ws-test"
       expect_has "and the Git Bash to start workers with" "$(cat "$R/run.env")" "WMUX_BASH=" ;;
+    wmux-ow)
+      expect_has "run.env records wmux-ow" "$(cat "$R/run.env")" "BACKEND=wmux-ow"
+      expect_has "run.env records this tab's workspace" "$(cat "$R/run.env")" "WORKSPACE=ws-test"
+      expect_has "and the pipe" "$(cat "$R/run.env")" "OW_PIPE=wmux-tester" ;;
     tmux-bg)
       expect_has "run.env records background tmux" "$(cat "$R/run.env")" "MODE=background"
       expect_has "init tells how to watch" "$out" "tmux attach -t brigadier-demo"
@@ -73,7 +78,8 @@ lifecycle() {
   out="$(brig wait 30 2>&1)"
   if ! has "$out" "CTX_HIGH w04"; then out+="$(brig wait 10 2>&1)"; fi
   expect_has "wait raises CTX_HIGH" "$out" "CTX_HIGH w04 ctx=85%"
-  bash "$TESTS_DIR/fakes/term/cmux" close-surface --force --surface "$(surface_of w04)" >/dev/null 2>&1
+  local s4; s4="$(surface_of w04)"
+  bash "$TESTS_DIR/fakes/term/cmux" close-surface --force --surface "${s4#*@}" >/dev/null 2>&1
   out="$(brig wait 30 2>&1)"
   expect_has "wait raises GONE" "$out" "GONE w04"
 
@@ -86,6 +92,6 @@ lifecycle() {
   unset BRIG_RUN
 }
 
-kinds=("$@"); (( ${#kinds[@]} )) || kinds=(cmux wmux tmux-bg tmux-attached)
+kinds=("$@"); (( ${#kinds[@]} )) || kinds=(cmux wmux wmux-ow tmux-bg tmux-attached)
 for k in "${kinds[@]}"; do lifecycle "$k"; done
 summary
