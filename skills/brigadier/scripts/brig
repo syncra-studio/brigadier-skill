@@ -83,8 +83,15 @@ if is_windows; then
     if [[ -n "$JQ_EXE" ]]; then jq() { command "$JQ_EXE" -b "$@"; }; fi
   fi
 fi
-# Source a shell file written by hand, ignoring Windows line endings.
-source_file() { local _src; _src="$(tr -d '\r' <"$1")" || return 1; eval "$_src"; }
+# Source a shell file written by hand. One with Windows line endings is sourced from a CR-free copy.
+source_file() {
+  # shellcheck disable=SC1090
+  if ! grep -q $'\r' "$1" 2>/dev/null; then source "$1"; return; fi
+  local _t _rc=0; _t="$(mktemp "${TMPDIR:-/tmp}/brig-config.XXXXXX")" || return 1
+  # shellcheck disable=SC1090
+  tr -d '\r' <"$1" >"$_t" && source "$_t" || _rc=1
+  rm -f "$_t"; return "$_rc"
+}
 # CLAUDE_CONFIG_DIR may be set the Windows way (C:\Users\…\.claude).
 if is_windows; then CFG_ROOT="$(posix_path "$CFG_ROOT")"; BRIG_HOME="$(posix_path "$BRIG_HOME")"; fi
 # On Windows a path may come as C:/… or C:\…; posix_path turns it into /c/… first.
@@ -980,7 +987,10 @@ cmd_doctor() {
   fi
   v="$(crlf_files | wc -l | tr -d ' ')"
   if (( v > 0 )); then no "$v skill files have Windows line endings (CRLF); run /brigadier setup to fix them"; fi
-  if command -v jq >/dev/null 2>&1; then ok "jq $(jq --version 2>/dev/null)"; else no "jq not found. $(install_hint jq)"; fi
+  if ! command -v jq >/dev/null 2>&1; then no "jq not found. $(install_hint jq)"
+  # On Windows every jq call passes -b (no CRs), which needs a recent jq.
+  elif is_windows && ! jq -n 1 >/dev/null 2>&1; then no "jq can't run with -b, which Windows needs; upgrade it with: winget upgrade --id jqlang.jq -e --source winget"
+  else ok "jq $(jq --version 2>/dev/null)"; fi
   if command -v git >/dev/null 2>&1; then ok "$(git --version)"; else no "git not found. $(install_hint git)"; fi
   if command -v claude >/dev/null 2>&1; then ok "claude $(claude --version 2>/dev/null | head -1)"
   else no "claude not on PATH. $(claude_install_hint)"; fi

@@ -391,6 +391,14 @@ expect_has "send --file takes a C:/ path and passes it on as one" "$(cat "$FAKE_
 brig kill w02 >/dev/null
 out="$(brig doctor 2>&1)"
 expect_has "doctor names the Git Bash that hooks and workers run" "$out" "ok    hooks and workers run $gb"
+ob="$T_ROOT/old-jq"; mkdir -p "$ob"
+# shellcheck disable=SC2016 # the fake jq's own script
+printf '#!/usr/bin/env bash\n[[ "$1" == -b ]] && { echo "Unknown arguments: -b" >&2; exit 2; }\nexec %q "$@"\n' "$(command -v jq)" >"$ob/jq"; chmod +x "$ob/jq"
+expect_has "doctor flags a jq too old for -b" "$(PATH="$ob:$PATH" brig doctor 2>&1)" "FAIL  jq can't run with -b, which Windows needs; upgrade it with: winget upgrade --id jqlang.jq"
+for b in wmux wmux-ow; do
+  # shellcheck disable=SC2016 # expanded by the inner bash
+  expect_has "$b quotes curly apostrophes for PowerShell too" "$(bash -c 'source "$1"; ps_quote "$2"' _ "$SKILL/scripts/backends/$b.sh" "C:/Users/O’Neil's ‘x’")" "'C:/Users/O’’Neil''s ‘‘x’’'"
+done
 unset CLAUDE_CODE_GIT_BASH_PATH
 out="$(env -u BRIG_HOME CLAUDE_CONFIG_DIR='C:\fake\cfg' bash "$SKILL/scripts/brig" config 2>&1)"
 expect_has "a Windows-style CLAUDE_CONFIG_DIR is read as a bash path" "$out" "user config: $T_ROOT/cfg/brigadier/config.env"

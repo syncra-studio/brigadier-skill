@@ -91,7 +91,13 @@ be_self_id() {
   if [[ -n "$s" ]]; then echo "$s@$WMUX_PTY_ID"; fi
 }
 
-ps_quote() { local sq="'"; printf "'%s'" "${1//$sq/$sq$sq}"; }
+# A PowerShell single-quoted string. PowerShell also ends one at the curly quotes ‘ ’ ‚ ‛, so those
+# are doubled like the plain one.
+ps_quote() {
+  local s="$1" c
+  for c in "'" "‘" "’" "‚" "‛"; do s="${s//$c/$c$c}"; done
+  printf "'%s'" "$s"
+}
 
 # surface.new can't take a command (the pipe handler forwards only workspaceId, shell and cwd:
 # src/main/pipe/handlers/surface.rpc.ts), so the tab opens in PowerShell and the command is typed

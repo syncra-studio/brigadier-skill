@@ -31,7 +31,7 @@ Or as a Claude Code plugin:
 
 Pick one of the two. Either way you get the `/brigadier` command (as a plugin it's also `/brigadier-skill:brigadier`).
 
-**2. In Claude Code, run `/brigadier setup`.** That's the only setup step. It checks `git`, `jq`, `claude`, your terminal (cmux or tmux; wmux on Windows) and the optional `codex`. Then it creates a commented-out `~/.claude/brigadier/config.env`, fixes Windows line endings in the skill's files, and finishes by running `/brigadier doctor`. Anything missing comes back as one exact command for your system (`brew install …`, `sudo apt install …`, `winget install …`). Setup runs those commands only when you say yes; a `sudo` command that would need your password is left for you to type. It's safe to run again at any time.
+**2. In Claude Code, run `/brigadier setup`.** That's the only setup step. On Windows, run it in a wmux tab; if you don't have wmux yet, setup tells you which one to get (see [Windows](#faq)). It checks `git`, `jq`, `claude`, your terminal (cmux or tmux; wmux on Windows) and the optional `codex`. Then it creates a commented-out `~/.claude/brigadier/config.env`, fixes Windows line endings in the skill's files, and finishes by running `/brigadier doctor`. Anything missing comes back as one exact command for your system (`brew install …`, `sudo apt install …`, `winget install …`). Setup runs those commands only when you say yes; a `sudo` command that would need your password is left for you to type. It's safe to run again at any time.
 
 ## 60-second quick start
 

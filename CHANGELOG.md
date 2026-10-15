@@ -27,6 +27,9 @@ All notable changes to this project are documented here. The format follows
   - Hooks, the statusLine and launch scripts start Git Bash by its full path instead of a bare `bash`, which can be WSL's launcher.
   - `/brigadier resume …` reaches claude.exe without MSYS rewriting it into a path.
   - New workers find tools that winget installed after the terminal opened.
+  - `send --file` and `rebirth` accept a `C:/…` path; Codex workers and the rebirth closer find a jq that winget installed as `jq-*.exe`.
+  - doctor fails with the upgrade command when jq is too old for `-b`.
+  - Paths with curly apostrophes (’) are quoted safely for PowerShell.
 
 ## [0.1.0] - 2026-10-14
 

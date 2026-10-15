@@ -24,8 +24,13 @@ be_init_run() {
 
 be_self_id() { echo "${WMUX_SURFACE_ID:-}"; }
 
-# A PowerShell single-quoted string.
-ps_quote() { local sq="'"; printf "'%s'" "${1//$sq/$sq$sq}"; }
+# A PowerShell single-quoted string. PowerShell also ends one at the curly quotes ‘ ’ ‚ ‛, so those
+# are doubled like the plain one.
+ps_quote() {
+  local s="$1" c
+  for c in "'" "‘" "’" "‚" "‛"; do s="${s//$c/$c$c}"; done
+  printf "'%s'" "$s"
+}
 
 # `agent spawn` runs --cmd in the tab's PowerShell. `; exit` closes the tab when the worker ends,
 # so a dead worker shows up as GONE instead of an idle prompt.
