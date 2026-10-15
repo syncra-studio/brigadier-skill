@@ -26,7 +26,6 @@ q() { printf '%q' "$1"; }
 # in mixed form, C:/Users/…, which both Git Bash and Windows programs understand.
 case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*) IS_WINDOWS=1 ;; *) IS_WINDOWS="" ;; esac
 is_windows() { [[ -n "$IS_WINDOWS" ]]; }
-if is_windows; then jq() { command jq -b "$@"; }; fi
 native_path() { if is_windows && command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else printf '%s\n' "$1"; fi; }
 posix_path() { if is_windows && command -v cygpath >/dev/null 2>&1; then cygpath -u "$1"; else printf '%s\n' "$1"; fi; }
 # Where winget and the Claude Code installer put tools. A terminal opened before the install
@@ -50,11 +49,13 @@ path_with_tools() {
   done < <(win_tool_dirs)
   printf '%s\n' "$p"
 }
-# jq installed by winget in a terminal that predates the install: find it, under either of its names.
-if is_windows && ! command -v jq >/dev/null 2>&1; then
-  PATH="$(path_with_tools)"
-  if ! command -v jq >/dev/null 2>&1; then
-    JQ_EXE="$(IFS=:; for _d in $PATH; do ls "$_d"/jq-*.exe 2>/dev/null; done | head -1)"
+# On Windows, jq runs with -b. If a winget install happened after this terminal opened, jq is found
+# where winget put it, under either of its names. (No wrapper without a jq: doctor must see it's missing.)
+if is_windows; then
+  command -v jq >/dev/null 2>&1 || PATH="$(path_with_tools)"
+  if command -v jq >/dev/null 2>&1; then jq() { command jq -b "$@"; }
+  else
+    JQ_EXE="$(IFS=:; for _d in $PATH; do ls "$_d"/jq-*.exe 2>/dev/null; done | head -1 || true)"
     if [[ -n "$JQ_EXE" ]]; then jq() { command "$JQ_EXE" -b "$@"; }; fi
   fi
 fi
@@ -148,21 +149,46 @@ reviewer() {
     *) if codex_on; then echo codex; else echo claude; fi ;;
   esac
 }
-install_hint() {
-  local pkg="$1" os id=""
-  os="$(uname -s)"
-  if [[ "$os" == Darwin ]]; then echo "Install it with: brew install $pkg"; return; fi
-  # shellcheck disable=SC1091
-  [[ -f /etc/os-release ]] && id="$(. /etc/os-release; echo "${ID:-} ${ID_LIKE:-}")"
+# The platform, for install commands: macos | windows | debian | fedora | arch | alpine | suse | linux.
+os_kind() {
+  local id=""
+  if is_windows; then echo windows; return; fi
+  case "$(uname -s 2>/dev/null)" in Darwin) echo macos; return ;; esac
+  local f="${BRIG_OS_RELEASE:-/etc/os-release}"
+  # shellcheck disable=SC1090
+  [[ -f "$f" ]] && id="$(. "$f"; echo "${ID:-} ${ID_LIKE:-}")"
   case "$id" in
-    *debian*|*ubuntu*) echo "Install it with: sudo apt install $pkg" ;;
-    *fedora*|*rhel*|*centos*) echo "Install it with: sudo dnf install $pkg" ;;
-    *arch*) echo "Install it with: sudo pacman -S $pkg" ;;
-    *alpine*) echo "Install it with: sudo apk add $pkg" ;;
-    *suse*) echo "Install it with: sudo zypper install $pkg" ;;
-    *) echo "Install '$pkg' with your package manager" ;;
+    *debian*|*ubuntu*) echo debian ;;
+    *fedora*|*rhel*|*centos*) echo fedora ;;
+    *arch*) echo arch ;;
+    *alpine*) echo alpine ;;
+    *suse*) echo suse ;;
+    *) echo linux ;;
   esac
 }
+# winget package ids for the tools Brigadier needs.
+winget_id() { case "$1" in jq) echo jqlang.jq ;; git) echo Git.Git ;; claude) echo Anthropic.ClaudeCode ;; esac; }
+# pkg_cmd <os> <pkg>...: the exact command that installs them, or nothing if there's no known one.
+pkg_cmd() {
+  local os="$1"; shift
+  case "$os" in
+    macos) echo "brew install $*" ;;
+    debian) echo "sudo apt install -y $*" ;;
+    fedora) echo "sudo dnf install -y $*" ;;
+    arch) echo "sudo pacman -S --needed $*" ;;
+    alpine) echo "sudo apk add $*" ;;
+    suse) echo "sudo zypper install -y $*" ;;
+    windows)
+      local p id out=""
+      for p in "$@"; do id="$(winget_id "$p")"; [[ -n "$id" ]] && out+="${out:+ && }winget install --id $id -e --source winget"; done
+      echo "$out" ;;
+  esac
+}
+install_hint() {
+  local c; c="$(pkg_cmd "$(os_kind)" "$1")"
+  if [[ -n "$c" ]]; then echo "Install it with: $c"; else echo "Install '$1' with your package manager"; fi
+}
+CLAUDE_INSTALL_HINT="https://code.claude.com/docs/en/setup"
 
 # ---- terminal backends ----------------------------------------------------------
 # Optional backend functions default to quiet no-ops.
@@ -838,17 +864,33 @@ cmd_config() {
   done
 }
 
+# Skill files with Windows line endings (a checkout made with core.autocrlf=true).
+crlf_files() { grep -rlI $'\r' "$SKILL_DIR" 2>/dev/null || true; }
+claude_install_hint() {
+  if is_windows; then echo "Install Claude Code: $(pkg_cmd windows claude) (or see $CLAUDE_INSTALL_HINT)"
+  else echo "Install Claude Code: see $CLAUDE_INSTALL_HINT"; fi
+}
+
 cmd_doctor() {
   local bad=0 v b
   ok() { printf '  ok    %s\n' "$*"; }
   warn() { printf '  note  %s\n' "$*"; }
   no() { printf '  FAIL  %s\n' "$*"; bad=1; }
+  if is_windows; then PATH="$(path_with_tools)"; fi
   echo "brig doctor (Brigadier $BRIG_VERSION)"
   if (( BASH_VERSINFO[0] > 3 || (BASH_VERSINFO[0] == 3 && BASH_VERSINFO[1] >= 2) )); then ok "bash $BASH_VERSION"; else no "bash $BASH_VERSION is too old (need 3.2+)"; fi
+  if is_windows; then
+    ok "Windows, Git Bash ($(uname -s))"
+    if [[ -n "${CLAUDE_CODE_GIT_BASH_PATH:-}" && ! -f "${CLAUDE_CODE_GIT_BASH_PATH}" ]]; then
+      no "CLAUDE_CODE_GIT_BASH_PATH=$CLAUDE_CODE_GIT_BASH_PATH doesn't exist; point it at Git's bin\\bash.exe or remove it"
+    fi
+  fi
+  v="$(crlf_files | wc -l | tr -d ' ')"
+  if (( v > 0 )); then no "$v skill files have Windows line endings (CRLF); run /brigadier setup to fix them"; fi
   if command -v jq >/dev/null 2>&1; then ok "jq $(jq --version 2>/dev/null)"; else no "jq not found. $(install_hint jq)"; fi
   if command -v git >/dev/null 2>&1; then ok "$(git --version)"; else no "git not found. $(install_hint git)"; fi
   if command -v claude >/dev/null 2>&1; then ok "claude $(claude --version 2>/dev/null | head -1)"
-  else no "claude not on PATH. Install Claude Code: https://code.claude.com/docs/en/setup"; fi
+  else no "claude not on PATH. $(claude_install_hint)"; fi
   if [[ "$BRIG_CODEX" == off ]]; then warn "Codex off (BRIG_CODEX=off); reviews use Claude"
   elif command -v codex >/dev/null 2>&1; then ok "codex $(codex --version 2>/dev/null | head -1) (reviews and Codex workers on)"
   else warn "codex not found (optional): reviews use a read-only Claude session; install the Codex CLI to add a second reviewer and Codex workers"; fi
@@ -871,7 +913,7 @@ cmd_doctor() {
   if mkdir -p "$BRIG_HOME" 2>/dev/null && [[ -w "$BRIG_HOME" ]]; then ok "state dir $BRIG_HOME"; else no "cannot write $BRIG_HOME (set BRIG_HOME to a writable dir)"; fi
   if [[ -f "$USER_CONFIG" ]]; then
     if (set +u; source_file "$USER_CONFIG") >/dev/null 2>&1; then ok "config $USER_CONFIG"; else no "config $USER_CONFIG has a shell syntax error"; fi
-  else warn "no config file yet; defaults apply (cp $SKILL_DIR/config.example.env $USER_CONFIG to change them)"; fi
+  else warn "no config file yet; defaults apply (/brigadier setup creates one to edit)"; fi
   if (( $(effort_rank "$BRIG_MAX_EFFORT") == 0 )); then no "BRIG_MAX_EFFORT=$BRIG_MAX_EFFORT is not low|medium|high|xhigh|max"
   elif (( $(effort_rank "$BRIG_DEFAULT_EFFORT") == 0 || $(effort_rank "$BRIG_DEFAULT_EFFORT") > $(effort_rank "$BRIG_MAX_EFFORT") )); then
     no "BRIG_DEFAULT_EFFORT=$BRIG_DEFAULT_EFFORT must be a valid effort at or below BRIG_MAX_EFFORT=$BRIG_MAX_EFFORT"
@@ -879,7 +921,117 @@ cmd_doctor() {
   if model_allowed "$BRIG_DEFAULT_MODEL"; then ok "models: default $BRIG_DEFAULT_MODEL, chores $BRIG_CHORE_MODEL, allowed: $BRIG_ALLOWED_MODELS"
   else no "BRIG_DEFAULT_MODEL=$BRIG_DEFAULT_MODEL is not in BRIG_ALLOWED_MODELS ($BRIG_ALLOWED_MODELS)"; fi
   if v="$( (check_permission_mode) 2>&1)"; then ok "worker permission mode: $BRIG_PERMISSION_MODE"; else no "${v#brig: }"; fi
-  if (( bad == 0 )); then echo "all good"; else echo "fix the FAIL lines first"; return 1; fi
+  if (( bad == 0 )); then echo "all good"; else echo "fix the FAIL lines first (/brigadier setup prints the exact commands)"; return 1; fi
+}
+
+# brig setup [--install [--yes]]: everything a new machine needs, then doctor.
+# Prints the exact install command for anything missing; runs package-manager installs only with
+# --install, after a yes on a terminal or --yes (which the skill passes only after the user agreed
+# in chat to the commands shown). Never overwrites a file. Safe to run again.
+cmd_setup() {
+  local install="" yes="" a
+  for a in "$@"; do
+    case "$a" in
+      --install) install=1 ;;
+      --yes) yes=1 ;;
+      *) die "usage: brig setup [--install [--yes]]" ;;
+    esac
+  done
+  [[ -z "${BRIG_WORKER:-}" ]] || die "workers don't run setup"
+  local os pkgs=() manual=() cmds=() line
+  os="$(os_kind)"
+  if is_windows; then PATH="$(path_with_tools)"; fi
+  item() { printf '  %-8s %s\n' "$1" "$2"; }
+  echo "brig setup (Brigadier $BRIG_VERSION)"
+  case "$os" in
+    macos) line="macOS$(command -v brew >/dev/null 2>&1 && echo " (Homebrew)" || echo ", no Homebrew")" ;;
+    windows) line="Windows, Git Bash$(command -v winget >/dev/null 2>&1 && echo " (winget)" || echo ", no winget")" ;;
+    linux) line="Linux (unknown distribution)" ;;
+    *) line="Linux ($os)" ;;
+  esac
+  [[ "$os" != windows && -n "${WSL_DISTRO_NAME:-}" ]] && line+=", WSL"
+  echo "platform: $line"
+
+  echo "tools:"
+  local t
+  for t in git jq; do
+    if command -v "$t" >/dev/null 2>&1; then item ok "$t"; else item missing "$t"; pkgs+=("$t"); fi
+  done
+  if command -v claude >/dev/null 2>&1; then item ok claude; else item missing "claude: $(claude_install_hint)"; manual+=("claude: $(claude_install_hint)"); fi
+  if [[ "$os" == windows ]]; then
+    if [[ -n "${WMUX_SURFACE_ID:-}" ]] && command -v wmux >/dev/null 2>&1; then item ok "wmux (this tab)"
+    else item missing "wmux: $(no_terminal_msg)"; manual+=("wmux: $(no_terminal_msg)"); fi
+  elif [[ -n "${CMUX_WORKSPACE_ID:-}" ]] && command -v cmux >/dev/null 2>&1; then item ok "cmux (this workspace)"
+  elif command -v tmux >/dev/null 2>&1; then item ok tmux
+  else item missing tmux; pkgs+=(tmux); fi
+  if command -v codex >/dev/null 2>&1; then item ok "codex (optional)"; else item note "codex (optional) not found: reviews use Claude"; fi
+
+  echo "files:"
+  if mkdir -p "$BRIG_HOME" 2>/dev/null && [[ -w "$BRIG_HOME" ]]; then item ok "state dir $BRIG_HOME"; else item FAIL "cannot write $BRIG_HOME"; fi
+  if [[ -f "$USER_CONFIG" ]]; then
+    if grep -q $'\r' "$USER_CONFIG"; then
+      cp "$USER_CONFIG" "$USER_CONFIG.bak" && tr -d '\r' <"$USER_CONFIG.bak" >"$USER_CONFIG" \
+        && item fixed "config $USER_CONFIG had Windows line endings (original kept as config.env.bak)"
+    else item ok "config $USER_CONFIG (left as it is)"; fi
+  elif [[ -d "$BRIG_HOME" ]]; then
+    { echo "# Created by 'brig setup'. Every setting is commented out, so the defaults apply and follow"
+      echo "# new releases. Uncomment a line to change it."
+      sed -E 's/^([A-Z_]+=)/# \1/' "$SKILL_DIR/config.example.env"; } >"$USER_CONFIG" \
+      && item created "config $USER_CONFIG (all settings commented out; defaults apply)"
+  fi
+  local f n=0
+  while IFS= read -r f; do
+    [[ -n "$f" ]] || continue
+    # brig is running right now; bash reads scripts as it goes, so it is never rewritten in place.
+    if [[ "$f" -ef "$BRIG_SCRIPT" ]]; then item FAIL "$f has Windows line endings; reinstall the skill"; continue; fi
+    tr -d '\r' <"$f" >"$f.lf.tmp" && mv -f "$f.lf.tmp" "$f" && n=$((n + 1))
+  done < <(crlf_files)
+  if (( n > 0 )); then item fixed "Windows line endings in $n skill files"; else item ok "skill files have Unix line endings"; fi
+
+  if (( ${#pkgs[@]} )); then
+    local c; c="$(pkg_cmd "$os" "${pkgs[@]}")"
+    if [[ -z "$c" ]]; then manual+=("${pkgs[*]}: install with your package manager")
+    elif [[ "$os" == macos ]] && ! command -v brew >/dev/null 2>&1; then
+      manual+=("Homebrew is needed for: $c (get Homebrew from https://brew.sh)")
+    elif [[ "$os" == windows ]] && ! command -v winget >/dev/null 2>&1; then
+      manual+=("winget (App Installer, from the Microsoft Store) is needed for: $c")
+    else cmds+=("$c"); fi
+  fi
+
+  if (( ${#cmds[@]} + ${#manual[@]} )); then
+    echo "to do:"
+    for c in ${cmds[@]+"${cmds[@]}"}; do echo "  run:  $c"; done
+    for c in ${manual[@]+"${manual[@]}"}; do echo "  by hand: $c"; done
+  fi
+  if (( ${#cmds[@]} )); then
+    if [[ -z "$install" ]]; then
+      echo "Nothing was installed. Run the commands above yourself, or 'brig setup --install' to have setup run them."
+    else
+      local go=""
+      if [[ -n "$yes" ]]; then go=1
+      elif [[ -t 0 ]]; then read -r -p "Run these now? [y/N] " a; [[ "$a" == [yY]* ]] && go=1
+      else echo "Not installing: there's no terminal to confirm in. Review the commands above, then run 'brig setup --install --yes'."; fi
+      if [[ -n "$go" ]]; then
+        for c in "${cmds[@]}"; do
+          if [[ "$c" == sudo\ * && ! -t 0 ]] && ! sudo -n true 2>/dev/null; then
+            echo "  needs your password, so run it yourself (in Claude Code: ! $c)"; continue
+          fi
+          echo "  \$ $c"
+          bash -c "$c" || echo "  that command failed (exit $?)"
+        done
+        if is_windows; then
+          PATH="$(path_with_tools)"
+          for t in ${pkgs[@]+"${pkgs[@]}"}; do
+            command -v "$t" >/dev/null 2>&1 \
+              || echo "  $t is installed but this terminal can't see it yet: restart wmux and Claude Code, then run /brigadier setup again."
+          done
+        fi
+      fi
+    fi
+  fi
+
+  echo
+  cmd_doctor
 }
 
 cmd_version() { echo "brig $BRIG_VERSION"; }
@@ -887,6 +1039,7 @@ cmd_version() { echo "brig $BRIG_VERSION"; }
 cmd_help() {
   cat <<EOF
 brig $BRIG_VERSION: Brigadier worker control (runs live in $BRIG_HOME/runs)
+  setup [--install [--yes]]       set this machine up (prints install commands; runs them only with --install), then doctor
   doctor                          check this machine (terminal backend, claude, codex, jq, config)
   config                          effective settings and where each comes from
   init <slug> [--slash CMD]       new run in this repo; prints BRIG_RUN=<run-id> (pass it on every later call)
@@ -917,6 +1070,6 @@ case "$sub" in
   _hook) cmd__hook "$@" ;;
   -h|--help) cmd_help ;;
   --version) cmd_version ;;
-  init|use|run|runs|spawn|send|handoff|kill|rebirth|ack|last|screen|status|watch|check|wait|finish|review|config|doctor|version|help) "cmd_$sub" "$@" ;;
+  init|use|run|runs|spawn|send|handoff|kill|rebirth|ack|last|screen|status|watch|check|wait|finish|review|config|doctor|setup|version|help) "cmd_$sub" "$@" ;;
   *) die "unknown command '$sub' (see 'brig help')" ;;
 esac

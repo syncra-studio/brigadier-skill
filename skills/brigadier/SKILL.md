@@ -1,9 +1,9 @@
 ---
 name: brigadier
-description: Run unattended overnight work in Claude Code. Brigadier turns one goal into a crew of Claude Code (and optionally Codex) worker sessions in cmux or tmux, answers their questions from your plan and rules, rotates each worker into a fresh session before its context fills, verifies every phase with a review, and leaves a morning report. Use when the user runs /brigadier with a goal, "/brigadier resume", or "/brigadier doctor".
+description: Run unattended overnight work in Claude Code. Brigadier turns one goal into a crew of Claude Code (and optionally Codex) worker sessions in cmux, tmux or wmux (Windows), answers their questions from your plan and rules, rotates each worker into a fresh session before its context fills, verifies every phase with a review, and leaves a morning report. Use when the user runs /brigadier with a goal, "/brigadier setup", "/brigadier resume", or "/brigadier doctor".
 license: MIT
-compatibility: Claude Code on macOS or Linux with jq, git and cmux or tmux (tmux is started in the background from a plain terminal). Codex CLI optional.
-argument-hint: <goal> | resume [run-id] | doctor | config
+compatibility: Claude Code on macOS, Linux or Windows (Git Bash) with jq and git, plus cmux or tmux (tmux is started in the background from a plain terminal) or, on Windows, wmux. Codex CLI optional. `/brigadier setup` checks and sets up all of it.
+argument-hint: <goal> | setup | resume [run-id] | doctor | config
 disable-model-invocation: true
 metadata:
   version: "0.1.0"
@@ -25,10 +25,18 @@ Run state lives outside the repo, in `~/.claude/brigadier/runs/<run-id>/`: `goal
 
 ## 0. First step, every time
 
-Run `brig doctor`.
+- No Bash tool (Windows without Git for Windows): tell the user Brigadier needs Git for Windows, installed with `winget install --id Git.Git -e --source winget`. Then they restart Claude Code and run `/brigadier setup`. Stop.
+- `brig` fails with `$'\r': command not found` or `invalid option name` (the skill was checked out with Windows line endings): run `sed -i 's/\r$//' "${CLAUDE_SKILL_DIR}/scripts/brig"`, then continue with setup below, which fixes the other files.
+
+If `$ARGUMENTS` is `setup`, run `brig setup` and show its output. The user is at the keyboard for this, so here, and only here, you ask them something:
+- `run:` lines are install commands setup didn't run. Show them exactly as printed and ask whether to run them. If the user says yes, run `brig setup --install --yes` and show its output. A command that "needs your password" is one the user types themselves, prefixed with `!`.
+- `by hand:` lines are steps only the user can do (installing wmux, restarting a terminal). Show them as they are.
+- Stop after that. Setup ends with doctor's report.
+
+Otherwise run `brig doctor`.
 - If it prints "Brigadier skill doesn't run inside the Brigadier app…", reply with exactly that line and stop.
-- If it prints `FAIL` lines, show the user those lines with their fixes and stop.
-- If `$ARGUMENTS` is empty or `doctor`, show the doctor output, then this usage and stop: `/brigadier <goal>` starts a run, `/brigadier resume [run-id]` continues one, `/brigadier config` shows the settings, and settings live in `~/.claude/brigadier/config.env` (template: `${CLAUDE_SKILL_DIR}/config.example.env`).
+- If it prints `FAIL` lines, show the user those lines with their fixes, say that `/brigadier setup` sets up what's missing, and stop.
+- If `$ARGUMENTS` is empty or `doctor`, show the doctor output, then this usage and stop: `/brigadier setup` sets up this machine, `/brigadier <goal>` starts a run, `/brigadier resume [run-id]` continues one, `/brigadier config` shows the settings, and settings live in `~/.claude/brigadier/config.env` (template: `${CLAUDE_SKILL_DIR}/config.example.env`).
 - If `$ARGUMENTS` is `config`, run `brig config`, show its output and stop.
 
 Otherwise `$ARGUMENTS` is one of:

@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Fake winget: `winget install --id <id> -e --source winget` puts the tool in $FAKE_WINGET_DIR,
+# which is NOT on the caller's PATH (like a terminal opened before the install).
+# shellcheck source=tests/fakes/os/fakeinstall.sh
+source "$(dirname "${BASH_SOURCE[0]}")/fakeinstall.sh"
+fi_log "winget $*"
+id=""; prev=""
+for a in "$@"; do [[ "$prev" == --id ]] && id="$a"; prev="$a"; done
+[[ "${1:-}" == install && -n "$id" ]] && fi_install "$FAKE_WINGET_DIR" "$id"

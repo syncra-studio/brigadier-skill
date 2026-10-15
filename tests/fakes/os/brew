@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Fake Homebrew: `brew install <pkg>...`.
+# shellcheck source=tests/fakes/os/fakeinstall.sh
+source "$(dirname "${BASH_SOURCE[0]}")/fakeinstall.sh"
+fi_log "brew $*"
+[[ "${1:-}" == install ]] && { shift; fi_install "$FAKE_INSTALL_DIR" "$@"; }

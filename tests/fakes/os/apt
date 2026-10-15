@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Fake apt: `apt install -y <pkg>...`.
+# shellcheck source=tests/fakes/os/fakeinstall.sh
+source "$(dirname "${BASH_SOURCE[0]}")/fakeinstall.sh"
+fi_log "apt $*"
+[[ "${1:-}" == install ]] && { shift; [[ "${1:-}" == -y ]] && shift; fi_install "$FAKE_INSTALL_DIR" "$@"; }

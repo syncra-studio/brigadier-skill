@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Fake sudo: `sudo -n true` succeeds only with FAKE_SUDO_NOPASS=1; anything else runs as is.
+# shellcheck source=tests/fakes/os/fakeinstall.sh
+source "$(dirname "${BASH_SOURCE[0]}")/fakeinstall.sh"
+if [[ "${1:-}" == -n ]]; then [[ "${FAKE_SUDO_NOPASS:-}" == 1 ]]; exit; fi
+fi_log "sudo $*"
+exec "$@"
