@@ -86,6 +86,20 @@ lifecycle() {
   expect_has "w03 finishes" "$out" "TURN_END w03 status=done"
   brig kill w02 >/dev/null; brig kill w03 >/dev/null
 
+  # A folder Claude Code doesn't trust yet: the worker waits at the dialog until brig accepts it.
+  fake_mode w05 trust
+  out="$(brig spawn w05 "$E_DIR/task.md" 2>&1)"
+  expect_has "spawn warns it can't tell whether the folder is trusted" "$out" "note: can't read Claude Code's list of trusted folders"
+  out="$(brig wait 30 2>&1)"
+  expect_has "wait raises TRUST_PROMPT" "$out" "TRUST_PROMPT w05: Claude Code asks whether to trust $E_DIR/repo"
+  expect_has "with the options as shown" "$out" "[options: ❯ No, exit | Yes, I trust this folder]"
+  out="$(brig trust w05 2>&1)"
+  expect_has "trust accepts it" "$out" "accepted the trust dialog in w05 (down enter)"
+  out="$(brig wait 30 2>&1)"
+  expect_has "and the worker gets going" "$out" "TURN_END w05 status=done"
+  expect_has "after down, enter" "$(keys_of "$(surface_of w05)" | tail -2 | tr '\n' ' ')" "down enter"
+  brig kill w05 >/dev/null
+
   # Context running high, then a terminal that disappears.
   fake_mode w04 ctx
   brig spawn w04 "$E_DIR/task.md" >/dev/null 2>&1

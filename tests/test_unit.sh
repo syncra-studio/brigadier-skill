@@ -464,6 +464,64 @@ expect_has "an openwong2kim tab without powershell.exe is explained" "$out" "Thi
 out="$(PATH="$wb" WMUX=1 WMUX_SURFACE_ID=surf-1 brig init x 2>&1)"
 expect_has "a wmux tab without the CLI is explained" "$out" "the 'wmux' command isn't on PATH"
 
+echo "== Claude Code's folder trust"
+new_env cmux
+CJ="$CLAUDE_CONFIG_DIR/.claude.json"
+trust() { jq -n '{projects: ([$ARGS.positional[] | {key: ., value: {hasTrustDialogAccepted: true}}] | from_entries)}' --args "$@"; }
+# spawn_in <dir>: a new run started in <dir>, one worker spawned; prints what spawn said.
+spawn_in() {
+  local rid; rid="$(cd "$1" && run_id_of "$(brig init tr)")"
+  BRIG_RUN="$rid" brig spawn w01 "$E_DIR/task.md" 2>&1
+  BRIG_RUN="$rid" brig kill w01 >/dev/null 2>&1
+}
+out="$(spawn_in "$E_DIR/repo")"
+expect_has "no .claude.json: spawn says it can't tell" "$out" "note: can't read Claude Code's list of trusted folders ($CJ)"
+trust "$E_DIR/repo" >"$CJ"; cp "$CJ" "$E_DIR/cj.before"
+out="$(spawn_in "$E_DIR/repo")"
+expect_not "a trusted repo: no note" "$out" "note:"
+check ".claude.json is never written" cmp -s "$CJ" "$E_DIR/cj.before"
+git -C "$E_DIR/repo" worktree add -q "$E_DIR/wt" -b wt-branch 2>/dev/null
+expect_not "a worktree of a trusted repo is trusted" "$(spawn_in "$E_DIR/wt")" "note:"
+mkdir -p "$E_DIR/repo/sub/deeper"
+expect_has "the run is the repo, from any subfolder" "$(spawn_in "$E_DIR/repo/sub/deeper")" "spawned w01"
+mkdir -p "$E_DIR/outer/inner" "$E_DIR/plain/child"; git -C "$E_DIR/outer/inner" init -q
+trust "$E_DIR/outer" "$E_DIR/plain" >"$CJ"
+out="$(spawn_in "$E_DIR/outer/inner")"
+expect_has "a git repo inside a trusted folder is not trusted" "$out" "note: Claude Code hasn't trusted $E_DIR/outer/inner yet (no hasTrustDialogAccepted for it in $CJ), so w01 will stop at its 'trust this folder' dialog"
+expect_not "a plain folder inside a trusted one is" "$(spawn_in "$E_DIR/plain/child")" "note:"
+jq -n --arg k "$E_DIR/repo" '{projects: {($k): {hasTrustDialogAccepted: false}}}' >"$CJ"
+expect_has "hasTrustDialogAccepted false is not trusted" "$(spawn_in "$E_DIR/repo")" "hasn't trusted $E_DIR/repo yet"
+mkdir -p "$E_DIR/workercfg"; trust "$E_DIR/repo" >"$E_DIR/workercfg/.claude.json"
+expect_not "workers' BRIG_CLAUDE_CONFIG_DIR is the one read" "$(BRIG_CLAUDE_CONFIG_DIR="$E_DIR/workercfg" spawn_in "$E_DIR/repo")" "note:"
+RID="$(run_id_of "$(brig init dialogs)")"; export BRIG_RUN="$RID"
+fake_mode w01 trust-yes-first
+brig spawn w01 "$E_DIR/task.md" >/dev/null 2>&1; sleep 4
+expect_has "check sees the trust dialog" "$(brig check)" "w01 flag=busy screen=trust status=- :: TRUST_PROMPT"
+out="$(brig trust w01 2>&1)"
+expect_has "trust reads the cursor: Yes first means Enter only" "$out" "accepted the trust dialog in w01 (enter)"
+out="$(brig wait 30)"; expect_has "and the worker starts" "$out" "TURN_END w01 status=done"
+fake_mode w02 trust-unreadable
+brig spawn w02 "$E_DIR/task.md" >/dev/null 2>&1
+out="$(brig wait 30)"; expect_has "a dialog without a cursor still raises TRUST_PROMPT" "$out" "TRUST_PROMPT w02"
+expect_has "and shows its options" "$out" "[options: No, exit | Yes, I trust this folder]"
+out="$(brig trust w02 2>&1)"; code=$?
+check "trust refuses a dialog it can't read" test "$code" -ne 0
+expect_has "and says why" "$out" "TRUST_UNREADABLE: can't tell which option of w02's trust dialog has the cursor"
+check "nothing was pressed" test -z "$(cat "$FAKE_TERM_DIR/s/$(surface_of w02)/keys" 2>/dev/null)"
+expect_has "it is logged" "$(cat "$BRIG_HOME/runs/$RID/events.log")" "trust w02: dialog not readable"
+out="$(brig trust w01 2>&1)"
+expect_has "trust presses nothing when there's no dialog" "$out" "TRUST_UNREADABLE: w01's screen doesn't show Claude Code's trust dialog"
+brig kill w01 >/dev/null; brig kill w02 >/dev/null; unset BRIG_RUN
+# Windows: Claude Code keys the folder as C:/…; letter case doesn't matter.
+export PATH="$TESTS_DIR/fakes/win:$PATH" FAKE_WIN_ROOT="$T_ROOT"
+gb="$T_ROOT/Program Files/Git/bin/bash.exe"; mkdir -p "${gb%/*}"; : >"$gb"; export CLAUDE_CODE_GIT_BASH_PATH="$gb"
+winrepo="C:/fake${E_DIR#"$T_ROOT"}/repo"
+trust "$(tr '[:lower:]' '[:upper:]' <<<"${winrepo:0:1}")$(tr '[:upper:]' '[:lower:]' <<<"${winrepo:1}")" >"$CJ"
+expect_not "on Windows the C:/ key is found, in any case" "$(spawn_in "$E_DIR/repo")" "note:"
+trust "$E_DIR/repo" >"$CJ"
+expect_has "and a POSIX key is not Claude Code's" "$(spawn_in "$E_DIR/repo")" "hasn't trusted $winrepo yet"
+unset FAKE_WIN_ROOT CLAUDE_CODE_GIT_BASH_PATH; export PATH="${PATH#"$TESTS_DIR/fakes/win:"}"
+
 echo "== installed copy without exec bits"
 new_env cmux
 inst="$T_ROOT/install/.claude/skills/brigadier"; mkdir -p "$(dirname "$inst")"

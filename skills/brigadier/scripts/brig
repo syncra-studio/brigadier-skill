@@ -379,10 +379,12 @@ rate_pct() { sl "$1" '(.rate_limits.five_hour.used_percentage // 0) | floor'; }
 rate_reset() { sl "$1" '.rate_limits.five_hour.resets_at // 0'; }
 ctx_label() { if [[ "$(agent_of "$1")" == codex ]]; then echo "-"; else echo "$(ctx_pct "$1")%"; fi; }
 busy() { (( $(mtime "$1/prompt.ts") > $(mtime "$1/stop.json") )); }
-# What a Claude worker's screen says it is doing: interrupted | working | background | idle | unknown.
+# What a Claude worker's screen says it is doing: trust | interrupted | working | background | idle | unknown.
 # A turn cut off by Esc or a restart fires no Stop hook, so `busy` stays true; only the screen shows it.
 screen_state() {
-  local txt; txt="$(be_read "$(readf "$1/surface")" 14 2>/dev/null)" || { echo unknown; return; }
+  local txt; txt="$(be_read "$(readf "$1/surface")" 30 2>/dev/null)" || { echo unknown; return; }
+  if [[ ! -f "$1/session.json" ]] && is_trust_screen "$txt"; then echo trust; return; fi
+  txt="$(tail -n 14 <<<"$txt")"
   if grep -q "Interrupted ·" <<<"$txt"; then echo interrupted
   elif grep -q "…" <<<"$txt"; then echo working
   elif grep -Eq "shells? still running|· [0-9]+ shells? ·" <<<"$txt"; then echo background
@@ -421,6 +423,57 @@ claude_settings_json() {
       Notification:     [{hooks: [{type: "command", command: "\($h) notify \($d)"}]}],
       PreCompact:       [{hooks: [{type: "command", command: "\($h) precompact \($d)"}]}]
     }} + (if $allowed == null then {} else {availableModels: $allowed} end)'
+}
+
+# ---- Claude Code's folder trust ----------------------------------------------------
+# A Claude session in a folder it doesn't trust waits at a "trust this folder" dialog, before any
+# hook runs. brig only reads Claude Code's list (it owns .claude.json and may be writing to it).
+# Measured on Claude Code 2.1.300: the key is the folder's real path (C:/… on Windows); a folder is
+# trusted if it, or a parent up to its git root (up to / outside git), is, or the main checkout of
+# its repo is (so worktrees count). A git repo nested in a trusted folder is not trusted.
+claude_json() {
+  local c="${BRIG_CLAUDE_CONFIG_DIR:-${CLAUDE_CONFIG_DIR:-}}"
+  if [[ -n "$c" ]]; then echo "$(posix_path "$c")/.claude.json"; else echo "$HOME/.claude.json"; fi
+}
+trust_keys() {
+  local d top="/" common
+  d="$(cd "$1" 2>/dev/null && pwd -P)" || return 1
+  if top="$(cd "$d" && git rev-parse --show-toplevel 2>/dev/null)" && [[ -n "$top" ]]; then
+    top="$(cd "$top" && pwd -P)"
+    if common="$(cd "$d" && cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P)" && [[ "$common" == */.git ]]; then
+      native_path "${common%/.git}"
+    fi
+  else top=/; fi
+  while :; do
+    # Git Bash's / is Git's own install dir, not a folder anyone trusts.
+    if [[ "$d" == / ]] && is_windows; then break; fi
+    native_path "$d"
+    [[ "$d" == "$top" || "$d" == / ]] && break
+    d="$(dirname "$d")"
+  done
+}
+# claude_trusted <dir>: 0 trusted, 1 not trusted, 2 can't tell (no readable .claude.json).
+claude_trusted() {
+  local f keys r ci=false; f="$(claude_json)"
+  [[ -r "$f" ]] || return 2
+  is_windows && ci=true
+  keys="$(trust_keys "$1" | jq -R . | jq -sc .)" || return 2
+  r="$(jq -r --argjson want "$keys" --argjson ci "$ci" '
+    def n: gsub("\\\\"; "/") | if $ci then ascii_downcase else . end;
+    ($want | map(n)) as $w
+    | [(.projects // {}) | to_entries[] | select(.value.hasTrustDialogAccepted == true) | .key | n]
+    | any(.[]; . as $p | any($w[]; . == $p))' "$f" 2>/dev/null)" || return 2
+  [[ "$r" == true ]] && return 0
+  return 1
+}
+# The dialog itself, as Claude Code 2.1.300 draws it: "Accessing workspace:", the folder, "Quick safety
+# check: Is this a project you created or one you trust?", then the options "No, exit" (listed first,
+# with the cursor) and "Yes, I trust this folder".
+TRUST_YES="Yes, I trust this folder"
+is_trust_screen() { grep -qF "$TRUST_YES" <<<"$1" || grep -qF "Is this a project you created or one you trust" <<<"$1"; }
+trust_dir_of() { awk '/Accessing workspace:/ { f = 1; next } f && NF { sub(/^[ \t]+/, ""); sub(/[ \t]+$/, ""); print; exit }' <<<"$1"; }
+trust_options_of() {
+  grep -E "No, exit|$TRUST_YES|No, continue without" <<<"$1" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' | paste -sd'|' - | sed 's/|/ | /g'
 }
 
 # ---- hooks (invoked by a Claude worker via --settings) -----------------------------
@@ -597,6 +650,13 @@ cmd_spawn() {
   echo "$sid" >"$d/surface"
   log_event "spawn $wid [$(cat "$d/model")] ${title:+($title) }${prev[*]:+continues ${prev[*]}}"
   echo "spawned $wid [$(cat "$d/model")] surface=$sid dir=$d"
+  if [[ "$agent" == claude ]]; then
+    local tr=0; claude_trusted "$REPO" || tr=$?
+    case "$tr" in
+      1) echo "note: Claude Code hasn't trusted $(native_path "$REPO") yet (no hasTrustDialogAccepted for it in $(claude_json)), so $wid will stop at its 'trust this folder' dialog; brig wait reports it as TRUST_PROMPT" ;;
+      2) echo "note: can't read Claude Code's list of trusted folders ($(claude_json)); if $wid stops at a 'trust this folder' dialog, brig wait reports it as TRUST_PROMPT" ;;
+    esac
+  fi
   be_watch_hint
 }
 
@@ -667,6 +727,50 @@ cmd_key() {
   done
   log_event "key $wid: ${keys[*]}"
   echo "pressed in $wid: ${keys[*]}"
+}
+
+# brig trust <wid>: accept Claude Code's "trust this folder" dialog. The option with the cursor is read
+# off the screen first; if the dialog can't be read for sure, nothing is pressed.
+cmd_trust() {
+  local wid="${1:?usage: brig trust <wid>}"
+  open_run
+  local d sid txt yes cur n i moves keys=() opts; d="$(wdir "$wid")"; sid="$(readf "$d/surface")"
+  [[ "$(agent_of "$d")" == claude ]] || die "$wid is a Codex worker; only Claude Code has a trust dialog"
+  # Its SessionStart hook has run, so the folder is trusted already: there's nothing to answer.
+  [[ ! -f "$d/session.json" ]] || die "TRUST_UNREADABLE: $wid's screen doesn't show Claude Code's trust dialog (its session has started); nothing was pressed"
+  txt="$(be_read "$sid" 30)" || die "can't read $wid's screen"
+  opts="$(trust_options_of "$txt")"
+  is_trust_screen "$txt" || die "TRUST_UNREADABLE: $wid's screen doesn't show Claude Code's trust dialog; nothing was pressed (brig screen $wid)"
+  yes="$(grep -nF "$TRUST_YES" <<<"$txt" | tail -1 | cut -d: -f1)"
+  # The cursor (❯) must sit on exactly one row of the option block around "Yes, I trust this folder".
+  cur=""; n=0
+  if [[ -n "$yes" ]]; then
+    for (( i = yes - 4; i <= yes + 4; i++ )); do
+      (( i >= 1 )) || continue
+      if sed -n "${i}p" <<<"$txt" | grep -q '❯'; then cur="$i"; n=$((n + 1)); fi
+    done
+  fi
+  if [[ -z "$yes" || "$n" -ne 1 ]]; then
+    log_event "trust $wid: dialog not readable [$opts]; nothing pressed"
+    die "TRUST_UNREADABLE: can't tell which option of $wid's trust dialog has the cursor (options: ${opts:-none found}); nothing was pressed. Only the user can answer it now (brig screen $wid)"
+  fi
+  local lo=$(( cur < yes ? cur : yes )) hi=$(( cur < yes ? yes : cur ))
+  for (( i = lo; i <= hi; i++ )); do
+    [[ -n "$(sed -n "${i}p" <<<"$txt" | tr -d '[:space:]')" ]] \
+      || die "TRUST_UNREADABLE: the cursor in $wid's trust dialog isn't in the option list (options: $opts); nothing was pressed"
+  done
+  moves=$(( yes - cur ))
+  while (( moves > 0 )); do keys+=(down); moves=$((moves - 1)); done
+  while (( moves < 0 )); do keys+=(up); moves=$((moves + 1)); done
+  keys+=(enter)
+  cmd_key "$wid" "${keys[@]}" >/dev/null
+  log_event "trust $wid: accepted (${keys[*]})"
+  # Claude Code runs its SessionStart hook once the folder is trusted.
+  for (( i = 0; i < 30; i++ )); do
+    if [[ -f "$d/session.json" ]]; then echo "accepted the trust dialog in $wid (${keys[*]}); it is starting"; return 0; fi
+    sleep 0.5
+  done
+  echo "pressed ${keys[*]} in $wid's trust dialog, but it hasn't started within 15s; look at 'brig screen $wid'"
 }
 
 cmd_kill() {
@@ -796,6 +900,7 @@ cmd_check() {
     verdict=ok
     [[ $flag == busy && ( $st == interrupted || $st == idle ) ]] && verdict="INTERRUPTED: tell it to clean up and continue"
     [[ $st == background ]] && verdict="ok: waiting on its own background job"
+    [[ $st == trust ]] && verdict="TRUST_PROMPT: Claude Code asks whether to trust the folder (brig screen $w; accept with brig trust $w)"
     [[ $flag == idle && $(readf "$d/status") == working ]] && verdict="waiting for your answer (brig last $w)"
     echo "$w flag=$flag screen=$st status=$(readf "$d/status" -) :: $verdict"
   done
@@ -830,6 +935,15 @@ cmd_wait() {
         events+=("TURN_END $w status=$(readf "$d/status" '-') ctx=$(ctx_label "$d") :: $msg")
       fi
       if [[ "$(agent_of "$d")" == claude ]]; then
+        # No hook runs before the trust dialog is answered, so only a worker without session.json can be at it.
+        if [[ ! -f "$d/session.json" && ! -f "$d/.trust_flag" ]] && (( $(now) - $(mtime "$d/launch.sh") >= 3 )); then
+          local ts; ts="$(be_read "$(readf "$d/surface")" 30 2>/dev/null || true)"
+          if is_trust_screen "$ts"; then
+            touch "$d/.trust_flag"
+            local td; td="$(trust_dir_of "$ts")"
+            events+=("TRUST_PROMPT $w: Claude Code asks whether to trust ${td:-$(native_path "$REPO")} [options: $(trust_options_of "$ts")]. If it is this run's repo, or a worktree or subfolder of it, accept with 'brig trust $w'; otherwise 'brig kill $w' and put the folder under Waiting on you")
+          fi
+        fi
         local c t; c="$(ctx_pct "$d")"; t="$(ctx_tokens "$d")"
         if (( c >= BRIG_CTX_PCT || t >= BRIG_CTX_TOKENS )) && [[ ! -f "$d/.ctx_flag" ]]; then
           touch "$d/.ctx_flag"; events+=("CTX_HIGH $w ctx=${c}% (~$(( t / 1000 ))k tokens; limits ${BRIG_CTX_PCT}% / $(( BRIG_CTX_TOKENS / 1000 ))k): send 'brig handoff $w'")
@@ -1187,8 +1301,9 @@ brig $BRIG_VERSION: Brigadier worker control (runs live in $BRIG_HOME/runs)
   spawn <wid> <task-file> [--agent claude|codex] [--title T] [--model M] [--effort E] [--continues WID]...
   send <wid> <text> | --file F    message a worker (typed into Claude; queued for Codex); long text goes in a file
   key <wid|successor> <key>...    press keys in order to answer a dialog: enter, escape, up, down, left, right, tab, space, 1-9
+  trust <wid>                     accept Claude Code's "trust this folder" dialog (reads it first; presses nothing it can't read)
   handoff <wid>                   standard "write handoff.md and stop" request
-  wait [seconds]                  block until an event: TURN_END, CTX_HIGH, COMPACTING, NEEDS_INPUT, INTERRUPTED,
+  wait [seconds]                  block until an event: TURN_END, CTX_HIGH, COMPACTING, NEEDS_INPUT, TRUST_PROMPT, INTERRUPTED,
                                   STALL, GONE, REJECTED, RATE_LIMIT, REBIRTH_DUE, NO_LIVE_WORKERS or HEARTBEAT
   status | watch                  table of workers / refreshing table (background tmux mode shows it in window 0)
   check                           busy flag vs screen per worker: finds turns cut off by Esc or a restart
@@ -1211,6 +1326,6 @@ case "$sub" in
   _hook) cmd__hook "$@" ;;
   -h|--help) cmd_help ;;
   --version) cmd_version ;;
-  init|use|run|runs|spawn|send|key|handoff|kill|rebirth|ack|last|screen|status|watch|check|wait|finish|review|config|doctor|setup|version|help) "cmd_$sub" "$@" ;;
+  init|use|run|runs|spawn|send|key|trust|handoff|kill|rebirth|ack|last|screen|status|watch|check|wait|finish|review|config|doctor|setup|version|help) "cmd_$sub" "$@" ;;
   *) die "unknown command '$sub' (see 'brig help')" ;;
 esac
