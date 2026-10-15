@@ -51,6 +51,8 @@ be_spawn() {
 # `send` types its text literally: no escapes are interpreted, so backslashes need no special care.
 be_send_text() { wm send --surface "$1" "$2" >/dev/null; }
 be_send_enter() { wm send-key enter --surface "$1" >/dev/null; }
+# wmux's key table (src/main/pty-keys.ts) has every name brig uses, and sends a single character as is.
+be_send_key() { wm send-key "$2" --surface "$1" >/dev/null; }
 be_read() { wm read-screen --surface "$1" --lines "${2:-40}" | jq -r '.text // empty'; }
 # close-surface answers ok even for an id that's already gone.
 be_close() { wm close-surface "$1" >/dev/null 2>&1 || true; }

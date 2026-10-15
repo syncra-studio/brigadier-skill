@@ -31,8 +31,15 @@ case "$sub" in
   set-window-option|rename-window) : ;;
   send-keys)
     t="$(opt -t "$@")"
-    if [[ " $* " == *" -l "* ]]; then ft_type "$t" "$(last "$@")"
-    else ft_enter "$t"; fi ;;
+    k="$(last "$@")"
+    if [[ " $* " == *" -l "* ]]; then ft_type "$t" "$k"
+    else
+      case "$k" in
+        Enter) ft_enter "$t" ;;
+        Escape|Up|Down|Left|Right|Tab|Space) ft_key "$t" "$(tr '[:upper:]' '[:lower:]' <<<"$k")" ;;
+        *) echo "fake tmux: unknown key $k" >&2; exit 1 ;;
+      esac
+    fi ;;
   capture-pane) ft_read "$(opt -t "$@")" 200 ;;
   kill-pane) ft_close "$(opt -t "$@")" ;;
   kill-session)

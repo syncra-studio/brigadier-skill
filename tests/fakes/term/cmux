@@ -29,7 +29,13 @@ case "$sub" in
     sid="$(opt surface "$@")"; text=""
     while (( $# )); do [[ "$1" == "--" ]] && { text="$2"; break; }; shift; done
     ft_type "$sid" "$text" ;;
-  send-key) ft_enter "$(opt surface "$@")" ;;
+  send-key)
+    sid="$(opt surface "$@")"; key="${!#}"
+    case "$key" in
+      enter) ft_enter "$sid" ;;
+      escape|up|down|left|right|tab|space) ft_key "$sid" "$key" ;;
+      *) echo "Error: invalid_params: Unknown key" >&2; exit 1 ;;
+    esac ;;
   read-screen) ft_read "$(opt surface "$@")" "$(opt lines "$@")" ;;
   close-surface) ft_close "$(opt surface "$@")" ;;
   tree)

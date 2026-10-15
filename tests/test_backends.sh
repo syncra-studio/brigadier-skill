@@ -6,6 +6,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 # The fake terminals share one state dir, so the fake cmux can list and close any surface.
 # A wmux-ow id is <surface>@<pty>; the fake terminal knows the pty.
+keys_of() { cat "$FAKE_TERM_DIR/s/$(printf '%s' "${1#*@}" | tr -c 'A-Za-z0-9_-' '_')/keys" 2>/dev/null; }
 fake_gone() { ! bash "$TESTS_DIR/fakes/term/cmux" tree | grep -qF "\"${1#*@}\""; }
 
 lifecycle() {
@@ -60,6 +61,19 @@ lifecycle() {
   brig send w02 "Go ahead." >/dev/null
   out="$(brig wait 30 2>&1)"
   expect_has "w02 got the answer" "$out" "TURN_END w02 status=working ctx=20% :: ack: Go ahead."
+  # Keys for a dialog: every backend presses them in order; digits and space may be typed.
+  sleep 1
+  out="$(brig key w02 Down 3 space enter 2>&1)"
+  expect_has "key presses keys in order" "$out" "pressed in w02: down 3 space enter"
+  out="$(brig wait 30 2>&1)"
+  expect_has "the worker got the keys" "$out" "ack: <key:down>3"
+  local k2; k2="$(keys_of "$(surface_of w02)")"
+  expect_has "the terminal pressed down" "$k2" "down"
+  check "and enter last" test "$(tail -1 <<<"$k2")" = enter
+  out="$(brig key w02 down f5 2>&1)"
+  expect_has "an unknown key is refused" "$out" "key 'f5' is not one brig presses"
+  check "and nothing was pressed" test "$(keys_of "$(surface_of w02)")" = "$k2"
+  expect_has "the press is logged" "$(cat "$R/events.log")" "key w02: down 3 space enter"
   sleep 1
   brig handoff w02 >/dev/null
   out="$(brig wait 30 2>&1)"

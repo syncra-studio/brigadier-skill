@@ -57,6 +57,15 @@ be_spawn() {
 
 be_send_text() { tm send-keys -t "$1" -l -- "$2"; }
 be_send_enter() { tm send-keys -t "$1" Enter; }
+be_send_key() {
+  case "$2" in
+    [1-9]) tm send-keys -t "$1" -l -- "$2" ;;
+    enter) tm send-keys -t "$1" Enter ;;
+    escape) tm send-keys -t "$1" Escape ;;
+    space) tm send-keys -t "$1" Space ;;
+    *) tm send-keys -t "$1" "$(tr '[:lower:]' '[:upper:]' <<<"${2:0:1}")${2:1}" ;;
+  esac
+}
 # Last N non-blank-trailing lines of the visible pane.
 be_read() {
   tm capture-pane -p -t "$1" | awk '{ l[NR] = $0; if ($0 ~ /[^[:space:]]/) last = NR } END { for (i = 1; i <= last; i++) print l[i] }' | tail -n "${2:-40}"

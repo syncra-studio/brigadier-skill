@@ -35,7 +35,14 @@ case "$sub" in
     sid="$(opt surface "$@")"; text=""
     while (( $# )); do if [[ "$1" == --surface ]]; then shift 2; else text="${text:+$text }$1"; shift; fi; done
     ft_type "$sid" "$text" && echo '{"ok":true}' ;;
-  send-key) ft_enter "$(opt surface "$@")" && echo '{"ok":true}' ;;
+  send-key)
+    sid="$(opt surface "$@")"
+    case "${1:-}" in
+      enter) ft_enter "$sid" ;;
+      escape|up|down|left|right|tab|space) ft_key "$sid" "$1" ;;
+      [1-9]) ft_type "$sid" "$1" ;;
+      *) echo '{"error":{"code":-32602,"message":"unknown key"}}'; exit 1 ;;
+    esac && echo '{"ok":true}' ;;
   read-screen)
     ft_read "$(opt surface "$@")" "$(opt lines "$@")" | jq -Rs --arg s "$(opt surface "$@")" '{text: ., surfaceId: $s}' ;;
   close-surface) ft_close "${1:-}"; echo '{"ok":true}' ;;

@@ -242,6 +242,7 @@ be_status_clear() { :; }
 be_watch_hint() { :; }
 be_finish() { :; }
 be_self_id() { :; }
+be_send_key() { echo "brig: the $BACKEND_LOADED backend can't press keys (it has no be_send_key)" >&2; return 1; }
 BACKEND_LOADED=""
 load_backend() {
   local b="$1"
@@ -644,6 +645,28 @@ cmd_handoff() {
 # The rebirth successor can be inspected or closed by the name "successor".
 target_surface() {
   if [[ "$1" == successor ]]; then readf "$RUN/rebirth.surface"; else readf "$(wdir "$1")/surface"; fi
+}
+
+# brig key <wid|successor> <key>...: press keys in a worker's terminal, in order (answering a dialog).
+KEYS_ALLOWED="enter escape up down left right tab space 1 2 3 4 5 6 7 8 9"
+cmd_key() {
+  local wid="${1:?usage: brig key <wid> <key>... (keys: ${KEYS_ALLOWED// /, })}"; shift
+  (( $# )) || die "usage: brig key <wid> <key>... (keys: ${KEYS_ALLOWED// /, })"
+  open_run
+  local sid a k keys=() n=0; sid="$(target_surface "$wid")"; [[ -n "$sid" ]] || die "$wid has no terminal"
+  # Every key is checked before the first one is pressed.
+  for a in "$@"; do
+    k="$(tr '[:upper:]' '[:lower:]' <<<"$a")"
+    case "$k" in esc) k=escape ;; return) k=enter ;; esac
+    [[ " $KEYS_ALLOWED " == *" $k "* ]] || die "key '$a' is not one brig presses (keys: ${KEYS_ALLOWED// /, }); nothing was pressed"
+    keys+=("$k")
+  done
+  for k in "${keys[@]}"; do
+    (( n++ )) && sleep 0.3
+    be_send_key "$sid" "$k" || die "the terminal refused '$k' for $wid (its message is above); $(( n - 1 )) of ${#keys[@]} keys were pressed"
+  done
+  log_event "key $wid: ${keys[*]}"
+  echo "pressed in $wid: ${keys[*]}"
 }
 
 cmd_kill() {
@@ -1163,6 +1186,7 @@ brig $BRIG_VERSION: Brigadier worker control (runs live in $BRIG_HOME/runs)
   use <run-id> | runs | run       bind this session to a run / list runs / print the bound run
   spawn <wid> <task-file> [--agent claude|codex] [--title T] [--model M] [--effort E] [--continues WID]...
   send <wid> <text> | --file F    message a worker (typed into Claude; queued for Codex); long text goes in a file
+  key <wid|successor> <key>...    press keys in order to answer a dialog: enter, escape, up, down, left, right, tab, space, 1-9
   handoff <wid>                   standard "write handoff.md and stop" request
   wait [seconds]                  block until an event: TURN_END, CTX_HIGH, COMPACTING, NEEDS_INPUT, INTERRUPTED,
                                   STALL, GONE, REJECTED, RATE_LIMIT, REBIRTH_DUE, NO_LIVE_WORKERS or HEARTBEAT
@@ -1187,6 +1211,6 @@ case "$sub" in
   _hook) cmd__hook "$@" ;;
   -h|--help) cmd_help ;;
   --version) cmd_version ;;
-  init|use|run|runs|spawn|send|handoff|kill|rebirth|ack|last|screen|status|watch|check|wait|finish|review|config|doctor|setup|version|help) "cmd_$sub" "$@" ;;
+  init|use|run|runs|spawn|send|key|handoff|kill|rebirth|ack|last|screen|status|watch|check|wait|finish|review|config|doctor|setup|version|help) "cmd_$sub" "$@" ;;
   *) die "unknown command '$sub' (see 'brig help')" ;;
 esac

@@ -204,6 +204,13 @@ sleep 1
 brig send w01 'it'"'"'s "quoted" & $literal' >/dev/null
 out="$(brig wait 30)"; expect_has "text reaches the worker unchanged" "$out" "ack: it's \"quoted\" & \$literal"
 expect_has "screen reads come back as text" "$(brig screen w01 5)" "ack: it's"
+out="$(brig key w01 escape 2>&1)"
+expect_has "keys go through input.sendKey" "$(cat "$FAKE_TERM_DIR/log")" "wmux-ow input.sendKey {\"ptyId\":\"${sid#*@}\",\"workspaceId\":\"ws-test\",\"key\":\"escape\"}"
+brig send w01 'show a permission dialog' >/dev/null; sleep 1
+out="$(brig key w01 1 2>&1)"; code=$?
+check "a key at a numbered approval prompt fails" test "$code" -ne 0
+expect_has "with wmux's own reason" "$out" "is showing an approval prompt"
+expect_has "and how many keys got through" "$out" "0 of 1 keys were pressed"
 brig kill w01 >/dev/null
 check "kill closes the surface" grep -q "wmux-ow surface.close {\"id\":\"${sid%@*}\"}" "$FAKE_TERM_DIR/log"
 fake_mode successor ack

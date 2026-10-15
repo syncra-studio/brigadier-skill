@@ -20,6 +20,12 @@ tok="$(cat "${USERPROFILE:-/nonexistent}/.wmux-auth-token" 2>/dev/null)"
 [[ -n "$tok" && "$(jq -r .token <<<"$req")" == "$tok" ]] \
   || { err "Unauthorized"; exit 0; }
 WS="ws-test"
+# wmux's approval gate (assertNotTypingAtAnApproval): with autonomy off, the default, raw input is
+# refused while a numbered option sits under a cursor on the pane's screen.
+gated() {
+  ft_read "$1" 60 2>/dev/null | grep -Eq '^[[:space:]│]*[❯>›»][[:space:]]*[0-9]{1,2}[.)][[:space:]]+[^[:space:]]' || return 1
+  err "$2: pane \"$1\" is showing an approval prompt, and this workspace's policy (autonomy-off) does not let an automated caller answer it — refusing raw input."
+}
 mkdir -p "$FAKE_TERM_DIR/ow"
 case "$m" in
   system.identify) ok '{"app":"wmux","version":"4.5.0-fake","platform":"win32"}' ;;
@@ -42,10 +48,17 @@ case "$m" in
         if ft_alive "$pty"; then jq -cn --arg s "$(cat "$FAKE_TERM_DIR/ow/$pty")" --arg p "$pty" '{id: $s, ptyId: $p}'; fi
       done
     } | jq -sc . | { read -r a; ok "$a"; } ;;
-  input.send) if ft_type "$(P ptyId)" "$(P text)"; then ok '{"ok":true}'; else err "input.send: no such pty"; fi ;;
+  input.send)
+    gated "$(P ptyId)" input.send && exit 0
+    if ft_type "$(P ptyId)" "$(P text)"; then ok '{"ok":true}'; else err "input.send: no such pty"; fi ;;
   input.sendKey)
-    [[ "$(P key)" == enter ]] || { err "fake: only enter"; exit 0; }
-    if ft_enter "$(P ptyId)"; then ok '{"ok":true}'; else err "input.sendKey: no such pty"; fi ;;
+    k="$(P key)"
+    case "$k" in enter|tab|escape|up|down|left|right|ctrl+c|ctrl+d|ctrl+z|ctrl+l) ;;
+      *) err "input.sendKey: unknown key \"$k\". Supported: enter, tab, ctrl+c, ctrl+d, ctrl+z, ctrl+l, escape, up, down, right, left"; exit 0 ;;
+    esac
+    gated "$(P ptyId)" input.sendKey && exit 0
+    if [[ "$k" == enter ]]; then f=ft_enter; else f=ft_key; fi
+    if "$f" "$(P ptyId)" "$k"; then ok '{"ok":true}'; else err "input.sendKey: no such pty"; fi ;;
   input.readScreen)
     t="$(ft_read "$(P ptyId)" "$(P tail_lines)")" || { err "input.readScreen: no such pty"; exit 0; }
     ok "$(jq -cn --arg t "$t" --arg p "$(P ptyId)" '{text: $t, ptyId: $p}')" ;;

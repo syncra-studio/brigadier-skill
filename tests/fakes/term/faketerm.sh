@@ -44,7 +44,14 @@ ft_ids() {
 ft_type() { local sd; sd="$(ft_dir "$1")"; ft_alive "$1" || return 1; printf '%s' "$2" >>"$sd/pending"; }
 ft_enter() {
   local sd; sd="$(ft_dir "$1")"; ft_alive "$1" || return 1
+  echo enter >>"$sd/keys"
   { cat "$sd/pending"; printf '\n'; } >"$sd/in"; : >"$sd/pending"
+}
+# ft_key <id> <name>: any other key. It is recorded, and reaches the program as a <key:NAME> token
+# on the line the next Enter sends (the fake claude reads its dialogs that way).
+ft_key() {
+  local sd; sd="$(ft_dir "$1")"; ft_alive "$1" || return 1
+  echo "$2" >>"$sd/keys"; printf '<key:%s>' "$2" >>"$sd/pending"
 }
 ft_read() { local sd; sd="$(ft_dir "$1")"; [[ -d "$sd" ]] || return 1; tail -n "${2:-40}" "$sd/screen"; }
 ft_close() {

@@ -30,6 +30,14 @@ be_send_text() {
   else cmux send --force --surface "$1" -- "$2" >/dev/null; fi
 }
 be_send_enter() { cmux send-key --force --surface "$1" enter >/dev/null; }
+# be_send_key <id> <key>: one of enter escape up down left right tab space 1-9. cmux has no key named
+# after a digit, so a digit is typed.
+be_send_key() {
+  case "$2" in
+    [1-9]) cmux send --force --surface "$1" -- "$2" >/dev/null ;;
+    *) cmux send-key --force --surface "$1" "$2" >/dev/null ;;
+  esac
+}
 be_read() { cmux read-screen --surface "$1" --lines "${2:-40}"; }
 be_close() { cmux close-surface --force --surface "$1" >/dev/null; }
 be_live_ids() {

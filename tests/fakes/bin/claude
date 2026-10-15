@@ -53,6 +53,24 @@ d="$(sed -n 's|^Read \(.*\)/task\.md and follow it exactly.*|\1|p' <<<"$prompt")
 wid="$(basename "$d")"
 mode="$(cat "$BRIG_HOME/fake-modes/$wid" 2>/dev/null || echo "done")"
 
+# Claude Code's trust dialog comes before any hook runs (measured on 2.1.300): "No, exit" is listed
+# first and has the cursor, so Enter alone exits. Keys arrive as <key:NAME> tokens on the Enter line.
+case "$mode" in
+  trust|trust-yes-first|trust-unreadable)
+    printf ' Accessing workspace:\n\n %s\n\n Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source project, or work from your team). If not, take a moment to review what'"'"'s in this folder first.\n\n Claude Code'"'"'ll be able to read, edit, and execute files here.\n\n Security guide\n\n' "$PWD"
+    case "$mode" in
+      trust) printf ' ❯ No, exit\n   Yes, I trust this folder\n'; want="<key:down>" ;;
+      trust-yes-first) printf ' ❯ Yes, I trust this folder\n   No, exit\n'; want="" ;;
+      *) printf '   No, exit\n   Yes, I trust this folder\n'; want="<key:down>" ;;
+    esac
+    printf '\n Enter to confirm · Esc to cancel\n'
+    IFS= read -r line || exit 0
+    log "claude $wid trust answer: [$line]"
+    [[ "$line" == "$want" ]] || { echo "fake claude: not trusted, exiting"; exit 0; }
+    echo "trusted"
+    mode="done" ;;
+esac
+
 hook SessionStart '{"session_id":"fake","transcript_path":""}'
 hook UserPromptSubmit '{}'
 echo working >"$d/status"
@@ -75,6 +93,8 @@ while IFS= read -r line; do
   hook UserPromptSubmit '{}'
   log "claude $wid got: $line"
   case "$line" in
+    *"show a permission dialog"*)
+      printf ' Bash command\n\n   rm -rf build\n\n Do you want to proceed?\n ❯ 1. Yes\n   2. No\n\n Esc to cancel\n' ;;
     *"BRIGADIER: HANDOFF"*)
       printf '# Handoff\nfake handoff from %s\n' "$wid" >"$d/handoff.md"
       echo handoff >"$d/status"

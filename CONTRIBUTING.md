@@ -33,6 +33,7 @@ A backend is one file, `skills/brigadier/scripts/backends/<name>.sh`, that `brig
 | `be_spawn <cwd> <script> <title>` | yes | open a new tab, window or pane in `<cwd>` that runs `bash <script>` (if the terminal can't take a command, type it in once the shell is ready); print its id. An id is one word, without spaces |
 | `be_send_text <id> <text>` | yes | type `<text>` literally, without Enter |
 | `be_send_enter <id>` | yes | press Enter |
+| `be_send_key <id> <key>` | yes | press one key: `enter`, `escape`, `up`, `down`, `left`, `right`, `tab`, `space` or a digit `1`–`9` (`brig key` checks the name first). A terminal with no named key for it may type the character. Fail with the terminal's own message if it refuses |
 | `be_read <id> <lines>` | yes | print the last `<lines>` lines of the screen |
 | `be_close <id>` | yes | close it |
 | `be_live_ids` | yes | print every live id, one per line; exit non-zero only if the terminal can't be queried |

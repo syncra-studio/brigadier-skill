@@ -134,6 +134,17 @@ be_send_enter() {
   ow_rpc input.sendKey "$(jq -cn --arg p "$(ow_pty "$1")" --arg w "$WORKSPACE" \
     '{ptyId: $p, workspaceId: $w, key: "enter"}')" >/dev/null
 }
+# input.sendKey knows enter, tab, escape and the arrows (KEY_MAP in src/main/pipe/handlers/input.rpc.ts);
+# space and digits are typed. wmux refuses both while a numbered approval prompt ("❯ 1. Yes") is on
+# screen, unless the workspace lets automated callers answer approvals; its error says so.
+be_send_key() {
+  case "$2" in
+    [1-9]) be_send_text "$1" "$2" ;;
+    space) be_send_text "$1" " " ;;
+    *) ow_rpc input.sendKey "$(jq -cn --arg p "$(ow_pty "$1")" --arg w "$WORKSPACE" --arg k "$2" \
+         '{ptyId: $p, workspaceId: $w, key: $k}')" >/dev/null ;;
+  esac
+}
 be_read() {
   ow_rpc input.readScreen "$(jq -cn --arg p "$(ow_pty "$1")" --arg w "$WORKSPACE" --argjson n "${2:-40}" \
     '{ptyId: $p, workspaceId: $w, tail_lines: $n}')" | jq -r '.text // empty'
