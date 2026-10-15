@@ -360,8 +360,10 @@ brig spawn c01 "$E_DIR/task.md" --agent codex >/dev/null 2>&1
 expect_has "a codex worker starts under Git Bash by its full path" "$(cat "$R/workers/c01/launch.sh")" "exec \"$gb\" $SKILL/scripts/codex-worker"
 brig kill c01 >/dev/null
 fake_mode successor ack
-BRIG_REBIRTH_TIMEOUT=20 brig rebirth >/dev/null 2>&1
+echo "note" >"$E_DIR/note.md"
+BRIG_REBIRTH_TIMEOUT=20 brig rebirth "C:/fake${E_DIR#"$T_ROOT"}/note.md" >/dev/null 2>&1
 B="$(cat "$R/rebirth.sh")"
+expect_has "a rebirth note given as a C:/ path reaches the successor as one" "$B" "C:/fake${E_DIR#"$T_ROOT"}/note.md"
 expect_has "rebirth.sh keeps MSYS off the slash command" "$B" "export MSYS2_ARG_CONV_EXCL=/brigadier-skill:brigadier"
 expect_has "and still passes it to claude" "$B" "/brigadier-skill:brigadier\\ resume\\ $RID"
 check "the old tab closes after the ack" wait_for 10 grep -q "close-surface --force --surface $CMUX_SURFACE_ID" "$FAKE_TERM_DIR/log"
@@ -372,6 +374,21 @@ bash "$SKILL/scripts/codex-worker" "$cw" "$E_DIR/repo" high "hello" >/dev/null 2
 expect_has "codex-worker hands codex its output file as a Windows path" "$(cat "$FAKE_LOG")" "-o C:/fake/cw-win/last.md"
 expect_has "and keeps MSYS from rewriting codex's arguments" "$(cat "$FAKE_LOG")" "codex env MSYS2_ARG_CONV_EXCL=*"
 expect_has "with Windows paths as writable roots" "$(cat "$FAKE_LOG")" "writable_roots=[\"C:/fake/cw-win\""
+# winget's jq can be on PATH only as jq-windows-amd64.exe; codex-worker finds it the way brig does.
+jb="$T_ROOT/jq-exe-only"; mkdir -p "$jb"
+for c in bash git grep cut head tail mkdir sed tr date cat dirname basename find sort awk ls rm mv wc tee od; do
+  p="$(command -v "$c")" && ln -sf "$p" "$jb/$c"
+done
+ln -sf "$(command -v jq)" "$jb/jq-windows-amd64.exe"
+cw="$T_ROOT/cw-jq"; mkdir -p "$cw"; : >"$FAKE_LOG"
+PATH="$TESTS_DIR/fakes/win:$TESTS_DIR/fakes/bin:$jb" bash "$SKILL/scripts/codex-worker" "$cw" "$E_DIR/repo" high "hello" >/dev/null 2>&1
+expect_has "codex-worker uses a jq that is only there as jq-*.exe" "$(cat "$FAKE_LOG")" "writable_roots=[\"C:/fake/cw-jq\""
+check "and writes its session file" jq -e .transcript_path "$cw/session.json"
+mkdir -p "$E_DIR/msgs"; echo "the answer" >"$E_DIR/msgs/answer.md"
+brig spawn w02 "$E_DIR/task.md" >/dev/null 2>&1
+brig send w02 --file "C:/fake${E_DIR#"$T_ROOT"}/msgs/answer.md" >/dev/null
+expect_has "send --file takes a C:/ path and passes it on as one" "$(cat "$FAKE_TERM_DIR/log")" "Read C:/fake${E_DIR#"$T_ROOT"}/msgs/answer.md and proceed"
+brig kill w02 >/dev/null
 out="$(brig doctor 2>&1)"
 expect_has "doctor names the Git Bash that hooks and workers run" "$out" "ok    hooks and workers run $gb"
 unset CLAUDE_CODE_GIT_BASH_PATH

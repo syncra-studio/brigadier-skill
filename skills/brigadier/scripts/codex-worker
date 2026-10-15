@@ -19,7 +19,14 @@
 # so a resumed turn keeps exactly the same permissions as the first one.
 set -uo pipefail
 # Windows (Git Bash): a native jq.exe writes CRLF unless given -b, and codex.exe wants C:/… paths.
-case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*) win=1; jq() { command jq -b "$@"; } ;; *) win="" ;; esac
+# winget's jq may be on PATH only as jq-windows-amd64.exe (launch.sh adds winget's dirs), as brig allows.
+case "$(uname -s 2>/dev/null)" in
+  MINGW*|MSYS*|CYGWIN*)
+    win=1 jq_exe=jq
+    command -v jq >/dev/null 2>&1 || jq_exe="$(IFS=:; for _d in $PATH; do ls "$_d"/jq-*.exe 2>/dev/null; done | head -1)"
+    jq() { command "${jq_exe:-jq}" -b "$@"; } ;;
+  *) win="" ;;
+esac
 native_path() { if [[ -n "$win" ]] && command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else printf '%s\n' "$1"; fi; }
 # MSYS rewrites arguments to native programs that look like POSIX paths, prompt text included, so
 # codex.exe gets its arguments untouched and every path in them is converted explicitly.

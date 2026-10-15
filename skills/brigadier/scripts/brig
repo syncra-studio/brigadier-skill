@@ -87,7 +87,8 @@ fi
 source_file() { local _src; _src="$(tr -d '\r' <"$1")" || return 1; eval "$_src"; }
 # CLAUDE_CONFIG_DIR may be set the Windows way (C:\Users\…\.claude).
 if is_windows; then CFG_ROOT="$(posix_path "$CFG_ROOT")"; BRIG_HOME="$(posix_path "$BRIG_HOME")"; fi
-abspath() { if [[ "$1" == /* ]]; then echo "$1"; else echo "$PWD/$1"; fi; }
+# On Windows a path may come as C:/… or C:\…; posix_path turns it into /c/… first.
+abspath() { local p; p="$(posix_path "$1")"; if [[ "$p" == /* ]]; then echo "$p"; else echo "$PWD/$p"; fi; }
 if stat -c %Y / >/dev/null 2>&1; then
   mtime() { if [[ -e "$1" ]]; then stat -c %Y "$1"; else echo 0; fi; }
 else
@@ -599,9 +600,9 @@ cmd_send() {
   local d; d="$(wdir "$wid")"
   local msg
   if [[ "${1:-}" == --file ]]; then
-    local f="${2:?usage: brig send <wid> --file <path>}"
-    [[ -f "$f" ]] || die "no such file: $f"
-    msg="Read $(native_path "$(abspath "$f")") and proceed. It is the brigadier's message to you."
+    local f; f="$(abspath "${2:?usage: brig send <wid> --file <path>}")"
+    [[ -f "$f" ]] || die "no such file: $2"
+    msg="Read $(native_path "$f") and proceed. It is the brigadier's message to you."
   else
     msg="$*"; msg="${msg//$'\n'/ }"
   fi
@@ -665,11 +666,11 @@ cmd_rebirth() {
   local note="${1:-}"
   [[ -z "${BRIG_WORKER:-}" ]] || die "workers hand off with handoff.md; rebirth is for the brigadier"
   open_run
-  [[ -z "$note" || -f "$note" ]] || die "no such note: $note"
+  if [[ -n "$note" ]]; then note="$(abspath "$note")"; [[ -f "$note" ]] || die "no such note: $1"; fi
   check_permission_mode
   local model; model="$(claude_model "")"
   local prompt="${SLASH:-/brigadier} resume $RUN_ID"
-  [[ -n "$note" ]] && prompt+=". First read $(native_path "$(abspath "$note")"): it is the previous brigadier's note to you."
+  [[ -n "$note" ]] && prompt+=". First read $(native_path "$note"): it is the previous brigadier's note to you."
   local skip=false; [[ "$BRIG_PERMISSION_MODE" == bypassPermissions ]] && skip=true
   jq -n --argjson skip "$skip" '{skipDangerousModePermissionPrompt: $skip}' >"$RUN/rebirth-settings.json"
   {
@@ -710,7 +711,7 @@ cmd_rebirth() {
     # The closer outlives this process: it loads the run's backend itself, with the helpers backends use.
     local helpers; helpers="$(declare -f die q is_windows native_path posix_path jq 2>/dev/null || true)"
     nohup "${BASH:-bash}" -c "$helpers
-      IS_WINDOWS=$(q "$IS_WINDOWS")
+      IS_WINDOWS=$(q "$IS_WINDOWS") JQ_EXE=$(q "${JQ_EXE:-}")
       source $(q "$RUN/run.env")
       source $(q "$SKILL_DIR/scripts/backends/$BACKEND.sh")
       sleep 5; be_close $(q "$self")" >/dev/null 2>&1 &
