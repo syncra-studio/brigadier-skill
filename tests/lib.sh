@@ -20,7 +20,10 @@ cleanup() {
       [[ -s "$sd/pid" ]] && kill "$(cat "$sd/pid")" 2>/dev/null
     done
   fi
-  for s in ${T_SOCKETS[@]+"${T_SOCKETS[@]}"}; do tmux -L "$s" kill-server >/dev/null 2>&1; done
+  for s in ${T_SOCKETS[@]+"${T_SOCKETS[@]}"}; do
+    tmux -L "$s" kill-server >/dev/null 2>&1
+    rm -f "${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/$s" # kill-server can leave the socket file behind
+  done
   # Watch loops and successors started inside fake terminals exit with their surfaces; give them a moment.
   sleep 0.3
   rm -rf "$T_ROOT"

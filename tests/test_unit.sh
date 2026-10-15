@@ -208,6 +208,22 @@ unset BRIG_RUN
 rm -f "$USERPROFILE/.wmux-auth-token"
 out="$(brig init badtoken 2>&1)"
 expect_has "a pipe that refuses the token is explained" "$out" "openwong2kim/wmux's pipe (wmux-tester) didn't answer"
+new_env wmux-ow
+export FAKE_OW_HIDE_SELF=1 # the brigadier's own tab isn't in surface.list
+RID="$(run_id_of "$(brig init noself)")"; export BRIG_RUN="$RID"
+n0="$(wc -l <"$FAKE_TERM_DIR/log")"
+out="$(brig spawn w01 "$E_DIR/task.md" 2>&1)"; code=$?
+check "spawn works when the brigadier's own tab can't be found" test "$code" -eq 0
+expect_not "and hands focus to no tab" "$(tail -n +"$((n0 + 1))" "$FAKE_TERM_DIR/log")" "surface.focus"
+out="$(brig wait 30)"; expect_has "the worker reports in" "$out" "TURN_END w01 status=done"
+brig kill w01 >/dev/null
+fake_mode successor ack
+out="$(BRIG_REBIRTH_TIMEOUT=20 brig rebirth 2>&1)"; code=$?
+check "rebirth works too" test "$code" -eq 0
+expect_has "and leaves this tab open for the user to close" "$out" "This session can stop here"
+brig kill successor >/dev/null
+brig finish "done" >/dev/null
+unset BRIG_RUN FAKE_OW_HIDE_SELF
 
 echo "== which wmux"
 new_env wmux-ow

@@ -35,7 +35,7 @@ case "$m" in
   surface.list)
     ws="$(P workspaceId)"; ws="${ws:-$WS}"
     {
-      if [[ "$ws" == "$WS" && -n "${WMUX_PTY_ID:-}" && ! -e "$FAKE_TERM_DIR/ow/closed-${WMUX_PTY_ID}" ]]; then
+      if [[ "$ws" == "$WS" && -n "${WMUX_PTY_ID:-}" && ! -e "$FAKE_TERM_DIR/ow/closed-${WMUX_PTY_ID}" && -z "${FAKE_OW_HIDE_SELF:-}" ]]; then
         jq -cn --arg p "$WMUX_PTY_ID" '{id: ("osurf-self-" + $p), ptyId: $p}'
       fi
       for pty in $(ft_group_ids "$ws"); do

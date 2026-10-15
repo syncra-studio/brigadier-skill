@@ -87,7 +87,8 @@ be_self_id() {
   [[ -n "${WMUX_PTY_ID:-}" ]] || return 0
   local s="${WMUX_SURFACE_ID:-}"
   [[ -n "$s" ]] || s="$(ow_surface_of "$WMUX_PTY_ID" 2>/dev/null || true)"
-  [[ -n "$s" ]] && echo "$s@$WMUX_PTY_ID"
+  # Unknown is fine (no focus hand-back, no self-close on rebirth), but must not fail under set -e.
+  if [[ -n "$s" ]]; then echo "$s@$WMUX_PTY_ID"; fi
 }
 
 ps_quote() { local sq="'"; printf "'%s'" "${1//$sq/$sq$sq}"; }

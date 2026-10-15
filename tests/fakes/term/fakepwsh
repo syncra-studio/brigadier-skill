@@ -7,5 +7,5 @@ re="^& '(([^']|'')*)' '(([^']|'')*)'; exit$"
 [[ "$line" =~ $re ]] || { echo "fakepwsh: unexpected input: $line"; exit 1; }
 sq="'"; exe="${BASH_REMATCH[1]//$sq$sq/$sq}"; script="${BASH_REMATCH[3]//$sq$sq/$sq}"
 echo
-"$exe" "$script"
-exit 0
+# exec, so closing the tab (killing this PID) ends the worker too, as closing a real tab would.
+exec "$exe" "$script"
