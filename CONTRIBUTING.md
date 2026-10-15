@@ -4,7 +4,8 @@ Thanks for helping. Issues and pull requests are welcome.
 
 ## Ground rules
 
-- Keep `brig` in portable bash: it must run on macOS's bash 3.2 and on Linux (no associative arrays, no `mapfile`, no GNU-only or BSD-only flags without a fallback).
+- Keep `brig` in portable bash: it must run on macOS's bash 3.2, on Linux and in Git Bash on Windows (no associative arrays, no `mapfile`, no GNU-only or BSD-only flags without a fallback).
+- On Windows, paths that leave bash (prompt text for Claude or Codex, arguments to `.exe` programs, commands written into settings) go through `native_path`, and commands written for Claude Code start Git Bash by its full path (`bash_cmd`). `jq` runs with `-b` there, so its output has no CR. The repo's `.gitattributes` keeps every file LF; don't add files that need CRLF.
 - Start every bundled script with `bash <path>` and never rely on executable bits; installers don't always keep them.
 - Never read or write `BRIGADIER_*` environment variables other than `BRIGADIER_SESSION`, and never create git branches under `brigadier/` or `overnight/`. Those belong to the Brigadier app.
 - Every change keeps `bash tests/run.sh` green (shellcheck + fake-terminal suites + real-tmux smoke).
@@ -17,7 +18,9 @@ bash tests/run.sh --no-smoke    # skip the real-tmux smoke test
 bash tests/test_backends.sh cmux tmux-bg   # one suite, some backends
 ```
 
-You need `shellcheck`, `jq`, `git` and, for the smoke test, `tmux`. The suites put fake `claude`, `codex`, `cmux` and `tmux` first on `PATH`, so they never touch your real sessions or spend any quota. Each run uses its own `/tmp/brig-test-XXXXXX` directory and its own tmux server, and cleans up only what it created.
+`tests/test_setup.sh` covers `brig setup` on every platform with fake package managers (`tests/fakes/os/`), and the Windows cases run with a fake `uname` and `cygpath` (`tests/fakes/win/`).
+
+You need `shellcheck`, `jq`, `git` and, for the smoke test, `tmux`. The suites put fake `claude`, `codex`, `cmux`, `tmux`, `wmux` and `powershell.exe` (for openwong2kim/wmux's pipe) first on `PATH`, so they never touch your real sessions or spend any quota. Each run uses its own `/tmp/brig-test-XXXXXX` directory and its own tmux server, and cleans up only what it created.
 
 ## Adding a terminal backend
 
@@ -27,7 +30,7 @@ A backend is one file, `skills/brigadier/scripts/backends/<name>.sh`, that `brig
 |---|---|---|
 | `be_available` | yes | exit 0 if this backend can run here |
 | `be_init_run <run-dir> <slug>` | yes | set up for a new run; print `KEY=value` lines (shell-quoted) for `run.env`, including `MODE=attached` or `MODE=background` and anything your other functions need later |
-| `be_spawn <cwd> <script> <title>` | yes | open a new tab, window or pane in `<cwd>` that runs `bash <script>`; print its id |
+| `be_spawn <cwd> <script> <title>` | yes | open a new tab, window or pane in `<cwd>` that runs `bash <script>` (if the terminal can't take a command, type it in once the shell is ready); print its id. An id is one word, without spaces |
 | `be_send_text <id> <text>` | yes | type `<text>` literally, without Enter |
 | `be_send_enter <id>` | yes | press Enter |
 | `be_read <id> <lines>` | yes | print the last `<lines>` lines of the screen |
@@ -44,7 +47,7 @@ Variables from `run.env` are in scope when your functions run. Then:
 2. Add a fake for it under `tests/fakes/term/` (the shared `faketerm.sh` does most of the work) and add it to the backend list in `tests/test_backends.sh`.
 3. Mention it in the README's Terminals table.
 
-Backends we'd love to see: Windows (wmux), Zellij, WezTerm, kitty, iTerm.
+Backends we'd love to see: Zellij, WezTerm, kitty, iTerm. The two wmux backends (`wmux.sh` for amirlehmam/wmux, `wmux-ow.sh` for openwong2kim/wmux) show how to handle a terminal that opens PowerShell tabs, or one that is driven over an RPC pipe.
 
 ## Changing the playbook
 

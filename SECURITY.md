@@ -2,12 +2,22 @@
 
 ## What Brigadier is, security-wise
 
-Brigadier starts Claude Code and, optionally, Codex sessions on your machine and lets them work unattended. By default, workers run with permissions bypassed (`BRIG_PERMISSION_MODE=bypassPermissions`), so they can run any command your user account can. See "Safety & cost" in the README for how to run stricter.
+Brigadier starts Claude Code and, optionally, Codex sessions on your machine and lets them work unattended. The defaults differ by agent:
+- **Claude workers** run with permissions bypassed (`BRIG_PERMISSION_MODE=bypassPermissions`), so they can run any command your user account can. Set a stricter mode to have prompts reach the brigadier instead.
+- **Codex workers** run in Codex's `workspace-write` sandbox (`BRIG_CODEX_SANDBOX=workspace-write`): they can write the repo, its git dirs and their own control dir, with network on and no prompts. `BRIG_CODEX_SANDBOX=bypass` turns the sandbox off. A Codex worker accepts queued messages only when they carry its per-worker inbox token, which only `brig send` writes; other files are refused and reported to the brigadier.
+
+`brig doctor` prints both settings. See "Safety & cost" in the README.
 
 Brigadier itself:
 - runs your own, unmodified `claude` and `codex` binaries, and never handles, stores or forwards your credentials or tokens;
-- makes no network requests of its own;
+- makes no network requests of its own (on Windows with openwong2kim/wmux it talks to that app's local named pipe, using the app's own auth token file);
 - keeps all run state in `~/.claude/brigadier/` on your machine.
+
+`brig setup` (`/brigadier setup`):
+- prints the exact package-manager command for anything missing (brew, apt, dnf, pacman, apk, zypper, winget) and runs it only with `--install`, after you confirm or pass `--yes`;
+- never runs a `sudo` command that would ask for a password without a terminal; it leaves that command for you;
+- never downloads or runs an installer itself (amirlehmam/wmux is a manual download from its releases page);
+- never overwrites an existing `config.env`; it only creates one with every setting commented out, and strips Windows line endings from it (keeping the original as `config.env.bak`) and from the skill's own files.
 
 ## Reporting a vulnerability
 

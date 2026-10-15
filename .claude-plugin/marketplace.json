@@ -6,9 +6,9 @@
     {
       "name": "brigadier-skill",
       "source": "./",
-      "description": "Hand Claude Code a goal at night: Brigadier runs a crew of Claude Code (and optionally Codex) workers in cmux or tmux and leaves a morning report.",
+      "description": "Hand Claude Code a goal at night: Brigadier runs a crew of Claude Code (and optionally Codex) workers in cmux, tmux or wmux (Windows) and leaves a morning report.",
       "category": "productivity",
-      "tags": ["overnight", "orchestration", "agents", "tmux", "cmux"]
+      "tags": ["overnight", "orchestration", "agents", "tmux", "cmux", "wmux", "windows"]
     }
   ]
 }
