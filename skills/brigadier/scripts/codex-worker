@@ -21,6 +21,9 @@ set -uo pipefail
 # Windows (Git Bash): a native jq.exe writes CRLF unless given -b, and codex.exe wants C:/… paths.
 case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*) win=1; jq() { command jq -b "$@"; } ;; *) win="" ;; esac
 native_path() { if [[ -n "$win" ]] && command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else printf '%s\n' "$1"; fi; }
+# MSYS rewrites arguments to native programs that look like POSIX paths, prompt text included, so
+# codex.exe gets its arguments untouched and every path in them is converted explicitly.
+if [[ -n "$win" ]]; then codex() { MSYS2_ARG_CONV_EXCL='*' MSYS_NO_PATHCONV=1 command codex "$@"; }; fi
 d="$1" repo="$2" effort="$3" kickoff="$4" model="${5:-}" sandbox="${6:-workspace-write}"
 
 case "$effort" in low|medium|high|xhigh|max) ;; *) echo "codex-worker: unknown effort '$effort'" >&2; exit 2 ;; esac
@@ -49,10 +52,10 @@ turn() {
   date +%s >"$d/prompt.ts"
   rm -f "$d/last.md"
   if [[ -z "$sid" ]]; then
-    codex exec "${flags[@]}" -o "$d/last.md" "$1" </dev/null 2>&1 | tee -a "$d/codex.log"
+    codex exec "${flags[@]}" -o "$(native_path "$d/last.md")" "$1" </dev/null 2>&1 | tee -a "$d/codex.log"
     sid="$(grep -m1 -Eo 'session id: [0-9a-f-]+' "$d/codex.log" | awk '{print $3}')"
   else
-    codex exec resume "${flags[@]}" -o "$d/last.md" "$sid" "$1" </dev/null 2>&1 | tee -a "$d/codex.log"
+    codex exec resume "${flags[@]}" -o "$(native_path "$d/last.md")" "$sid" "$1" </dev/null 2>&1 | tee -a "$d/codex.log"
   fi
   local m="(codex exited without a final message; see $d/codex.log)"
   [[ -s "$d/last.md" ]] && m="$(cat "$d/last.md")"

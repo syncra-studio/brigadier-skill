@@ -28,6 +28,30 @@ case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*) IS_WINDOWS=1 ;; *) IS_WI
 is_windows() { [[ -n "$IS_WINDOWS" ]]; }
 native_path() { if is_windows && command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else printf '%s\n' "$1"; fi; }
 posix_path() { if is_windows && command -v cygpath >/dev/null 2>&1; then cygpath -u "$1"; else printf '%s\n' "$1"; fi; }
+# Git Bash's own bash.exe, as a C:/… path. On Windows a bare `bash` can be WSL's launcher
+# (System32\bash.exe), so hooks, the statusLine and terminal tabs name this one in full.
+# bin\bash.exe sets up PATH for MSYS; usr\bin\bash.exe ($BASH) is the fallback.
+git_bash() {
+  local c root=""
+  if command -v cygpath >/dev/null 2>&1; then root="$(cygpath -m / 2>/dev/null)"; fi
+  for c in "${CLAUDE_CODE_GIT_BASH_PATH:-}" "${root:+${root%/}/bin/bash.exe}" "$(native_path "$BASH")"; do
+    if [[ -n "$c" && -f "$c" ]]; then echo "$c"; return 0; fi
+  done
+  return 1
+}
+# How a command line written for Claude Code starts bash: Git Bash in full (quoted) on Windows.
+bash_cmd() {
+  local b
+  if is_windows && b="$(git_bash)"; then printf '"%s"\n' "$b"; else echo bash; fi
+}
+# Lines for launch.sh/rebirth.sh on Windows. MSYS rewrites any argument to a native program that
+# starts with / (so `/brigadier resume …` reached claude.exe as `C:/Program Files/Git/brigadier …`).
+# Only the slash command is excluded: the variable is inherited by the session's own Git Bash.
+win_launch_lines() {
+  is_windows || return 0
+  echo "export PATH=$(q "$(path_with_tools)")"
+  echo "export MSYS2_ARG_CONV_EXCL=$(q "${SLASH:-/brigadier}")"
+}
 # Where winget and the Claude Code installer put tools. A terminal opened before the install
 # doesn't have them on PATH yet, so setup, doctor and new workers add them themselves.
 win_tool_dirs() {
@@ -515,15 +539,15 @@ cmd_spawn() {
     echo "cd $(q "$REPO") || exit 1"
     clean_env_lines
     # A terminal app on Windows starts its tabs with its own environment, not the brigadier's.
-    if is_windows; then echo "export PATH=$(q "$(path_with_tools)")"; fi
+    win_launch_lines
     echo "export BRIG_WORKER=$(q "$wid") BRIG_WORKER_DIR=$(q "$d") BRIG_RUN=$(q "$RUN") BRIG_SKILL_DIR=$(q "$SKILL_DIR")"
     if [[ "$agent" == claude ]]; then
-      claude_settings_json "bash $(q "$BRIG_SCRIPT") _hook" "$d" >"$d/settings.json"
+      claude_settings_json "$(bash_cmd) $(q "$BRIG_SCRIPT") _hook" "$d" >"$d/settings.json"
       printf 'exec claude --permission-mode %s --disallowedTools AskUserQuestion EnterPlanMode ExitPlanMode' "$(q "$BRIG_PERMISSION_MODE")"
       printf ' --settings %s --name %s --model %s --effort %s' "$(q "$(native_path "$d/settings.json")")" "$(q "$wid${title:+ · $title}")" "$(q "$model")" "$(q "$effort")"
       printf ' %s\n' "$(q "$kickoff")"
     else
-      echo "exec bash $(q "$SKILL_DIR/scripts/codex-worker") $(q "$d") $(q "$REPO") $(q "$effort") $(q "$kickoff") $(q "$model") $(q "$BRIG_CODEX_SANDBOX")"
+      echo "exec $(bash_cmd) $(q "$SKILL_DIR/scripts/codex-worker") $(q "$d") $(q "$REPO") $(q "$effort") $(q "$kickoff") $(q "$model") $(q "$BRIG_CODEX_SANDBOX")"
     fi
   } >"$d/launch.sh"
   chmod +x "$d/launch.sh"
@@ -626,7 +650,7 @@ cmd_rebirth() {
     echo "# Fresh brigadier for run $RUN_ID (written by brig rebirth)."
     echo "cd $(q "$REPO") || exit 1"
     clean_env_lines
-    if is_windows; then echo "export PATH=$(q "$(path_with_tools)")"; fi
+    win_launch_lines
     echo "export BRIG_RUN=$(q "$RUN")"
     printf 'exec claude --permission-mode %s --settings %s --model %s --effort %s --name %s %s\n' \
       "$(q "$BRIG_PERMISSION_MODE")" "$(q "$(native_path "$RUN/rebirth-settings.json")")" "$(q "$model")" "$(q "$BRIG_DEFAULT_EFFORT")" \
@@ -658,7 +682,7 @@ cmd_rebirth() {
     echo "REBIRTH_OK: the new brigadier confirmed. Closing this tab in 5s."
     # The closer outlives this process: it loads the run's backend itself, with the helpers backends use.
     local helpers; helpers="$(declare -f die q is_windows native_path posix_path jq 2>/dev/null || true)"
-    nohup bash -c "$helpers
+    nohup "${BASH:-bash}" -c "$helpers
       IS_WINDOWS=$(q "$IS_WINDOWS")
       source $(q "$RUN/run.env")
       source $(q "$SKILL_DIR/scripts/backends/$BACKEND.sh")
@@ -867,7 +891,7 @@ cmd_review() {
       prompt="Review $scope in this repository. Report concrete bugs and risks with file:line, severity (high/medium/low) and the fix you recommend. Do not modify any files.${focus:+ Focus only on: $focus.}"
       ;;
     plan)
-      prompt="Review the implementation plan in $plan for the project in this repository. Read it, and the project's own plan and decision documents it relies on (e.g. docs/, AGENTS.md, CLAUDE.md, README). Report only concrete problems: contradictions with the project's documented plan or settled decisions, missing or out-of-scope work, wrong or outdated libraries, versions or APIs, risky ordering, needless complexity. For each problem give severity (high/medium/low), the issue, and the fix you recommend. End with one verdict line: APPROVE, APPROVE WITH CHANGES, or REVISE. Do not modify any files.${focus:+ Focus: $focus}"
+      prompt="Review the implementation plan in $(native_path "$plan") for the project in this repository. Read it, and the project's own plan and decision documents it relies on (e.g. docs/, AGENTS.md, CLAUDE.md, README). Report only concrete problems: contradictions with the project's documented plan or settled decisions, missing or out-of-scope work, wrong or outdated libraries, versions or APIs, risky ordering, needless complexity. For each problem give severity (high/medium/low), the issue, and the fix you recommend. End with one verdict line: APPROVE, APPROVE WITH CHANGES, or REVISE. Do not modify any files.${focus:+ Focus: $focus}"
       ;;
     *) die "review kind must be code or plan" ;;
   esac
@@ -923,7 +947,8 @@ cmd_doctor() {
     ok "Windows, Git Bash ($(uname -s))"
     if [[ -n "${CLAUDE_CODE_GIT_BASH_PATH:-}" && ! -f "${CLAUDE_CODE_GIT_BASH_PATH}" ]]; then
       no "CLAUDE_CODE_GIT_BASH_PATH=$CLAUDE_CODE_GIT_BASH_PATH doesn't exist; point it at Git's bin\\bash.exe or remove it"
-    fi
+    elif v="$(git_bash)"; then ok "hooks and workers run $v"
+    else no "Git Bash's bash.exe not found; set CLAUDE_CODE_GIT_BASH_PATH to it (e.g. C:\\Program Files\\Git\\bin\\bash.exe)"; fi
   fi
   v="$(crlf_files | wc -l | tr -d ' ')"
   if (( v > 0 )); then no "$v skill files have Windows line endings (CRLF); run /brigadier setup to fix them"; fi

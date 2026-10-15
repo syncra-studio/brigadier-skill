@@ -5,6 +5,7 @@ log() { [[ -n "${FAKE_LOG:-}" ]] && printf '%s\n' "$*" >>"$FAKE_LOG"; true; }
 
 if [[ "${1:-}" == --version ]]; then echo "codex-cli 0.0.0-fake"; exit 0; fi
 log "codex $*"
+[[ -n "${MSYS2_ARG_CONV_EXCL:-}" ]] && log "codex env MSYS2_ARG_CONV_EXCL=$MSYS2_ARG_CONV_EXCL"
 for a in "$@"; do [[ "$a" == --full-auto ]] && { echo "error: unexpected argument '--full-auto' found" >&2; exit 2; }; done
 
 out="" prev="" last="" resume="" review=""

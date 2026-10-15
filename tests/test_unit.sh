@@ -163,6 +163,7 @@ expect_has "then closes when the worker ends" "$L" "launch.sh'; exit"
 expect_has "the quote is doubled for PowerShell" "$(grep -F 'agent spawn' "$FAKE_TERM_DIR/log" | tail -1)" "it''s here"
 expect_has "the tab is opened in the run's workspace" "$L" "agent spawn --workspace ws-test --cwd $E_DIR/repo"
 expect_has "and named after the worker" "$L" "wmux rename-surface $sid ⚙ w01 · it's · lead"
+expect_has "then focus goes back to the brigadier's tab" "$L" "wmux focus-surface $WMUX_SURFACE_ID"
 sleep 1; brig send w01 'use \n literally' >/dev/null
 expect_has "text goes in literally, as one argument" "$(cat "$FAKE_TERM_DIR/log")" "wmux send --surface $sid use \\n literally"
 out="$(brig wait 30)"; expect_has "and reaches the worker" "$out" "ack: use \\n literally"
@@ -273,16 +274,41 @@ brig kill w01 >/dev/null; unset BRIG_RUN
 echo "== Windows (Git Bash, simulated)"
 new_env cmux
 export PATH="$TESTS_DIR/fakes/win:$PATH" FAKE_WIN_ROOT="$T_ROOT"
-RID="$(run_id_of "$(brig init win)")"; export BRIG_RUN="$RID"; R="$BRIG_HOME/runs/$RID"
+gb="$T_ROOT/Program Files/Git/bin/bash.exe"; mkdir -p "${gb%/*}"; : >"$gb"
+export CLAUDE_CODE_GIT_BASH_PATH="$gb"
+RID="$(run_id_of "$(brig init --slash /brigadier-skill:brigadier win)")"; export BRIG_RUN="$RID"; R="$BRIG_HOME/runs/$RID"
 win="C:/fake${R#"$T_ROOT"}"
 brig spawn w01 "$E_DIR/task.md" >/dev/null 2>&1
 L="$(cat "$R/workers/w01/launch.sh")"
+S="$R/workers/w01/settings.json"
+for k in Stop SessionStart UserPromptSubmit Notification PreCompact; do
+  expect_has "the $k hook runs Git Bash by its full quoted path" "$(jq -r --arg k "$k" '.hooks[$k][0].hooks[0].command' "$S" | cut -c1-$(( ${#gb} + 3 )))" "\"$gb\" "
+done
+expect_has "so does the statusLine" "$(jq -r .statusLine.command "$S")" "\"$gb\" $SKILL/scripts/brig _hook statusline $R/workers/w01"
+expect_has "launch.sh keeps MSYS off the slash command" "$L" "export MSYS2_ARG_CONV_EXCL=/brigadier-skill:brigadier"
 expect_has "the kickoff names task.md as a Windows path" "$L" "Read\\ $win/workers/w01/task.md"
 expect_has "--settings gets a Windows path" "$L" "--settings $win/workers/w01/settings.json"
 expect_has "the worker gets the brigadier's PATH" "$L" "export PATH="
 expect_has "the protocol shows Windows paths" "$(cat "$R/workers/w01/task.md")" "Your private directory: \`$win/workers/w01\`"
-expect_has "hooks keep the bash path" "$(jq -r '.hooks.Stop[0].hooks[0].command' "$R/workers/w01/settings.json")" "bash $SKILL/scripts/brig _hook stop $R/workers/w01"
 brig kill w01 >/dev/null
+brig spawn c01 "$E_DIR/task.md" --agent codex >/dev/null 2>&1
+expect_has "a codex worker starts under Git Bash by its full path" "$(cat "$R/workers/c01/launch.sh")" "exec \"$gb\" $SKILL/scripts/codex-worker"
+brig kill c01 >/dev/null
+fake_mode successor ack
+BRIG_REBIRTH_TIMEOUT=20 brig rebirth >/dev/null 2>&1
+B="$(cat "$R/rebirth.sh")"
+expect_has "rebirth.sh keeps MSYS off the slash command" "$B" "export MSYS2_ARG_CONV_EXCL=/brigadier-skill:brigadier"
+expect_has "and still passes it to claude" "$B" "/brigadier-skill:brigadier\\ resume\\ $RID"
+brig kill successor >/dev/null 2>&1
+# One codex-worker turn under Git Bash (.state isn't live, so it stops after the kickoff).
+cw="$T_ROOT/cw-win"; mkdir -p "$cw"; : >"$FAKE_LOG"
+bash "$SKILL/scripts/codex-worker" "$cw" "$E_DIR/repo" high "hello" >/dev/null 2>&1
+expect_has "codex-worker hands codex its output file as a Windows path" "$(cat "$FAKE_LOG")" "-o C:/fake/cw-win/last.md"
+expect_has "and keeps MSYS from rewriting codex's arguments" "$(cat "$FAKE_LOG")" "codex env MSYS2_ARG_CONV_EXCL=*"
+expect_has "with Windows paths as writable roots" "$(cat "$FAKE_LOG")" "writable_roots=[\"C:/fake/cw-win\""
+out="$(brig doctor 2>&1)"
+expect_has "doctor names the Git Bash that hooks and workers run" "$out" "ok    hooks and workers run $gb"
+unset CLAUDE_CODE_GIT_BASH_PATH
 out="$(env -u BRIG_HOME CLAUDE_CONFIG_DIR='C:\fake\cfg' bash "$SKILL/scripts/brig" config 2>&1)"
 expect_has "a Windows-style CLAUDE_CONFIG_DIR is read as a bash path" "$out" "user config: $T_ROOT/cfg/brigadier/config.env"
 unset BRIG_RUN FAKE_WIN_ROOT; export PATH="${PATH#"$TESTS_DIR/fakes/win:"}"

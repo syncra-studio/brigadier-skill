@@ -3,7 +3,8 @@
 # Workers are tabs (surfaces) in the brigadier's wmux workspace. The brigadier itself runs in a
 # wmux tab, because wmux puts its `wmux` CLI on PATH only there. Written against wmux 2.24.0.
 # Sourced by brig. Contract: see CONTRIBUTING.md ("Adding a terminal backend").
-# Run-level variables available here (from run.env): WORKSPACE, WMUX_BASH.
+# Run-level variables available here (from run.env): WORKSPACE, WMUX_BASH (Git Bash's bash.exe:
+# wmux opens tabs in PowerShell, where a bare `bash` is WSL's launcher or nothing at all).
 
 # MSYS would rewrite any argument that looks like a POSIX path, message text included.
 # Paths that wmux needs are converted explicitly instead.
@@ -11,25 +12,13 @@ wm() { MSYS2_ARG_CONV_EXCL='*' wmux "$@"; }
 
 be_available() { [[ -n "${WMUX_SURFACE_ID:-}" ]] && command -v wmux >/dev/null 2>&1; }
 
-# The Git Bash that runs worker scripts. wmux opens tabs in PowerShell, where a bare `bash`
-# is WSL's launcher (System32\bash.exe) or nothing at all.
-wmux_bash() {
-  local c root=""
-  # bin\bash.exe in the Git install sets up PATH for MSYS; usr\bin\bash.exe ($BASH) is the fallback.
-  if command -v cygpath >/dev/null 2>&1; then root="$(cygpath -m / 2>/dev/null)"; fi
-  for c in "${CLAUDE_CODE_GIT_BASH_PATH:-}" "${root:+${root%/}/bin/bash.exe}" "$(native_path "$BASH")"; do
-    if [[ -n "$c" && -f "$c" ]]; then echo "$c"; return 0; fi
-  done
-  return 1
-}
-
 # be_init_run <run-dir> <slug>: prints KEY=VALUE lines for run.env.
 be_init_run() {
   [[ -n "${WMUX_SURFACE_ID:-}" ]] || die "wmux backend: not inside a wmux tab (WMUX_SURFACE_ID is unset)"
   local ws b
   ws="$(wm whoami | jq -r '.id // empty')" || die "wmux: 'wmux whoami' failed; is wmux running?"
   [[ -n "$ws" ]] || die "wmux: 'wmux whoami' did not name this tab's workspace"
-  b="$(wmux_bash)" || die "wmux: Git Bash's bash.exe not found; set CLAUDE_CODE_GIT_BASH_PATH to it"
+  b="$(git_bash)" || die "wmux: Git Bash's bash.exe not found; set CLAUDE_CODE_GIT_BASH_PATH to it"
   printf 'MODE=attached\nWORKSPACE=%q\nWMUX_BASH=%q\n' "$ws" "$b"
 }
 
@@ -48,6 +37,9 @@ be_spawn() {
   sid="$(jq -r '.surfaceId // empty' <<<"$out" 2>/dev/null)"
   [[ -n "$sid" ]] || die "wmux: could not read a surface id from: $out"
   wm rename-surface "$sid" "$title" >/dev/null 2>&1 || true
+  # The new tab becomes the active one in its pane (App.tsx, the agent "spawned" handler); hand
+  # the brigadier's own tab back so the user keeps seeing it.
+  if [[ -n "${WMUX_SURFACE_ID:-}" ]]; then wm focus-surface "$WMUX_SURFACE_ID" >/dev/null 2>&1 || true; fi
   echo "$sid"
 }
 

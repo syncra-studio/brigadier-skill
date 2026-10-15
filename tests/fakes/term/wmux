@@ -38,7 +38,7 @@ case "$sub" in
   read-screen)
     ft_read "$(opt surface "$@")" "$(opt lines "$@")" | jq -Rs --arg s "$(opt surface "$@")" '{text: ., surfaceId: $s}' ;;
   close-surface) ft_close "${1:-}"; echo '{"ok":true}' ;;
-  rename-surface|set-status) echo '{"ok":true}' ;;
+  rename-surface|set-status|focus-surface) echo '{"ok":true}' ;;
   notify) echo "Notification sent" ;;
   *) echo "fake wmux: unsupported command '$sub'" >&2; exit 2 ;;
 esac
