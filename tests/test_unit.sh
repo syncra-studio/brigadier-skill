@@ -246,6 +246,39 @@ brig kill successor >/dev/null
 brig finish "done" >/dev/null
 unset BRIG_RUN FAKE_OW_HIDE_SELF
 
+echo "== a worker at a permission dialog is not interrupted"
+new_env cmux
+RID="$(run_id_of "$(brig init dialog)")"; export BRIG_RUN="$RID"; R="$BRIG_HOME/runs/$RID"
+fake_mode w01 ask
+brig spawn w01 "$E_DIR/task.md" >/dev/null
+out="$(brig wait 30)"; expect_has "the worker asks" "$out" "TURN_END w01 status=working"
+sleep 1
+brig send w01 'show a permission dialog' >/dev/null
+out="$(BRIG_IDLE_SEC=1 brig wait 10)"
+expect_has "the dialog raises NEEDS_INPUT" "$out" "NEEDS_INPUT w01: Claude needs your permission to use Bash"
+check "and the hook notes when it asked" test -s "$R/workers/w01/needs_input.ts"
+sleep 2
+out="$(BRIG_IDLE_SEC=1 brig wait 3)"
+expect_not "a quiet worker at the dialog is not INTERRUPTED" "$out" "INTERRUPTED"
+expect_has "the wait just times out" "$out" "HEARTBEAT"
+out="$(brig check)"
+expect_has "check sees the dialog" "$out" "screen=dialog"
+expect_has "and says it waits for an answer" "$out" "NEEDS_INPUT: a dialog is waiting for an answer (brig screen w01)"
+rm -f "$R/workers/w01/needs_input.ts"
+out="$(BRIG_IDLE_SEC=1 brig wait 3)"
+expect_not "the dialog on screen alone is enough" "$out" "INTERRUPTED"
+brig send w01 'simulate an interrupt' >/dev/null; sleep 1
+date +%s >"$R/workers/w01/needs_input.ts"
+out="$(BRIG_IDLE_SEC=8 brig wait 3)"
+expect_not "a recent request for input holds INTERRUPTED back" "$out" "INTERRUPTED"
+rm -f "$R/workers/w01/needs_input.ts"
+out="$(BRIG_IDLE_SEC=1 brig wait 15)"
+expect_has "a cut-off turn still raises INTERRUPTED" "$out" "INTERRUPTED w01: marked busy but its screen is interrupted"
+out="$(BRIG_IDLE_SEC=1 brig wait 5)"
+expect_not "once" "$out" "INTERRUPTED"
+brig kill w01 >/dev/null
+unset BRIG_RUN
+
 echo "== which wmux"
 new_env wmux-ow
 export WMUX=1 WMUX_SURFACE_ID=surf-both

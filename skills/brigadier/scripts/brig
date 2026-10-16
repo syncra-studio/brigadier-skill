@@ -205,6 +205,8 @@ posture() {
   [[ "$BRIG_CODEX_SANDBOX" == bypass ]] && cx="Codex unsandboxed (BRIG_CODEX_SANDBOX=bypass)"
   echo "workers and the reborn brigadier: Claude $BRIG_PERMISSION_MODE · $cx. Change with BRIG_PERMISSION_MODE and BRIG_CODEX_SANDBOX in $USER_CONFIG"
 }
+# Notification types that mean a worker waits for an answer (NEEDS_INPUT).
+NEEDS_INPUT_TYPES="permission_prompt elicitation_dialog elicitation_url_dialog agent_needs_input"
 # Longest message `brig send` types or queues; anything longer goes through a file (send --file).
 MSG_MAX=2000
 codex_on() {
@@ -421,16 +423,26 @@ ctx_label() { if [[ "$(agent_of "$1")" == codex ]]; then echo "-"; else echo "$(
 # Codex reports no 5-hour window.
 rate_label() { if [[ "$(agent_of "$1")" == codex ]]; then echo "-"; else echo "$(rate_pct "$1")%"; fi; }
 busy() { (( $(mtime "$1/prompt.ts") > $(mtime "$1/stop.json") )); }
-# What a Claude worker's screen says it is doing: trust | interrupted | working | background | idle | unknown.
+# What a Claude worker's screen says it is doing: trust | dialog | interrupted | working | background | idle | unknown.
 # A turn cut off by Esc or a restart fires no Stop hook, so `busy` stays true; only the screen shows it.
+# A worker at a permission dialog writes nothing either, but it is waiting for an answer, not idle.
 screen_state() {
   local txt; txt="$(be_read "$(readf "$1/surface")" 30 2>/dev/null)" || { echo unknown; return; }
   if [[ ! -f "$1/session.json" ]] && is_trust_screen "$txt"; then echo trust; return; fi
   txt="$(tail -n 14 <<<"$txt")"
-  if grep -q "Interrupted ·" <<<"$txt"; then echo interrupted
+  # Whichever comes last on screen is the current one: a dialog, or the interruption that ended it.
+  local di ii; di="$(dialog_line "$txt")"; ii="$(grep -n "Interrupted ·" <<<"$txt" | tail -1 | cut -d: -f1)"
+  if (( ${di:-0} > ${ii:-0} )); then echo dialog
+  elif [[ -n "$ii" ]]; then echo interrupted
   elif grep -q "…" <<<"$txt"; then echo working
   elif grep -Eq "shells? still running|· [0-9]+ shells? ·" <<<"$txt"; then echo background
   else echo idle; fi
+}
+# Claude Code's permission dialogs: "Do you want to proceed?" (or "… make this edit …?") over numbered
+# options with a ❯ cursor.
+# dialog_line <text>: the number of the last line that belongs to one, or nothing.
+dialog_line() {
+  grep -nE '^[[:space:]│]*❯[[:space:]]*[0-9]{1,2}\.[[:space:]]+[^[:space:]]|Do you want to (proceed|make this edit|create|allow)' <<<"$1" | tail -1 | cut -d: -f1
 }
 transcript_mtime() {
   local tp="" tm
@@ -531,7 +543,11 @@ cmd__hook() {
     session) cat >"$d/session.json" ;;
     prompt) cat >/dev/null; now >"$d/prompt.ts" ;;
     stop) cat >"$d/stop.json.tmp" && mv -f "$d/stop.json.tmp" "$d/stop.json" ;;
-    notify) jq -c . >>"$d/notify.jsonl" ;;
+    notify)
+      local j; j="$(jq -c .)" || exit 0
+      printf '%s\n' "$j" >>"$d/notify.jsonl"
+      # When the worker last asked for input: the idle check counts from here too (cmd_wait).
+      if [[ " $NEEDS_INPUT_TYPES " == *" $(jq -r '.notification_type // ""' <<<"$j") "* ]]; then now >"$d/needs_input.ts"; fi ;;
     precompact) cat >"$d/precompact.json" ;;
     *) die "unknown hook $kind" ;;
   esac
@@ -1021,6 +1037,7 @@ cmd_check() {
     verdict=ok
     [[ $flag == busy && ( $st == interrupted || $st == idle ) ]] && verdict="INTERRUPTED: tell it to clean up and continue"
     [[ $st == background ]] && verdict="ok: waiting on its own background job"
+    [[ $st == dialog ]] && verdict="NEEDS_INPUT: a dialog is waiting for an answer (brig screen $w)"
     [[ $st == trust ]] && verdict="TRUST_PROMPT: Claude Code asks whether to trust the folder (brig screen $w; accept with brig trust $w)"
     [[ $flag == idle && $(readf "$d/status") == working ]] && verdict="waiting for your answer (brig last $w)"
     echo "$w flag=$flag screen=$st status=$(readf "$d/status" -) :: $verdict"
@@ -1077,7 +1094,7 @@ cmd_wait() {
           echo "$nl" >"$d/.seen_notify"
           local n; while IFS= read -r n; do
             case "$(jq -r '.notification_type // ""' <<<"$n")" in
-              permission_prompt|elicitation_dialog|elicitation_url_dialog|agent_needs_input)
+              permission_prompt|elicitation_dialog|elicitation_url_dialog|agent_needs_input) # NEEDS_INPUT_TYPES
                 events+=("NEEDS_INPUT $w: $(jq -r '.message // .notification_type' <<<"$n" | cut -c1-200); inspect with 'brig screen $w'") ;;
               quota_auto_resume_*) events+=("QUOTA $w: $(jq -r '.notification_type' <<<"$n")") ;;
             esac
@@ -1099,12 +1116,16 @@ cmd_wait() {
         fi
       fi
       if busy "$d"; then
-        local tm; tm="$(transcript_mtime "$d")"
-        if [[ "$(agent_of "$d")" == claude ]] && (( $(now) - tm > BRIG_IDLE_SEC )) && [[ "$(readf "$d/.screen_flag")" != "$tm" ]]; then
+        local tm it; tm="$(transcript_mtime "$d")"
+        # The idle clock also restarts when the worker asks for input: a dialog writes no transcript.
+        it="$(readf "$d/needs_input.ts" 0)"; [[ "$it" =~ ^[0-9]+$ ]] && (( it > tm )) || it="$tm"
+        if [[ "$(agent_of "$d")" == claude ]] && (( $(now) - it > BRIG_IDLE_SEC )) && [[ "$(readf "$d/.screen_flag")" != "$it" ]]; then
           local ss; ss="$(screen_state "$d")"
+          # A screen between two states (a dialog just answered) looks idle for a moment: read it again.
+          if [[ "$ss" == interrupted || "$ss" == idle ]]; then sleep 3; ss="$(screen_state "$d")"; fi
           case "$ss" in
             interrupted|idle)
-              echo "$tm" >"$d/.screen_flag"
+              echo "$it" >"$d/.screen_flag"
               events+=("INTERRUPTED $w: marked busy but its screen is $ss (a cut-off turn fires no Stop hook); check 'brig screen $w', then tell it to clean up and continue") ;;
           esac
         fi

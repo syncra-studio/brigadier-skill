@@ -95,7 +95,10 @@ while IFS= read -r line; do
   log "claude $wid got: $line"
   case "$line" in
     *"show a permission dialog"*)
+      hook Notification '{"notification_type":"permission_prompt","message":"Claude needs your permission to use Bash"}'
       printf ' Bash command\n\n   rm -rf build\n\n Do you want to proceed?\n ❯ 1. Yes\n   2. No\n\n Esc to cancel\n' ;;
+    *"simulate an interrupt"*)
+      printf '  ⎿  Interrupted · What should Claude do instead?\n\n❯ \n' ;;
     *"BRIGADIER: HANDOFF"*)
       printf '# Handoff\nfake handoff from %s\n' "$wid" >"$d/handoff.md"
       echo handoff >"$d/status"
