@@ -7,7 +7,7 @@
 # skill works even when an installer drops the executable bits.
 set -euo pipefail
 
-BRIG_VERSION="0.1.0"
+BRIG_VERSION="0.2.0"
 SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BRIG_SCRIPT="$SKILL_DIR/scripts/brig"
 CFG_ROOT="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"

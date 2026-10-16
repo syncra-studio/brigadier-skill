@@ -14,7 +14,7 @@ expect_has "doctor is guarded too" "$out" "doesn't run inside the Brigadier app"
 out="$(BRIGADIER_SESSION=1 brig init x 2>&1)"
 expect_has "init is guarded too" "$out" "doesn't run inside the Brigadier app"
 check "help still works" bash -c "BRIGADIER_SESSION=1 bash '$SKILL/scripts/brig' help >/dev/null"
-expect_has "version still works" "$(BRIGADIER_SESSION=1 brig version)" "brig 0.1.0"
+expect_has "version still works" "$(BRIGADIER_SESSION=1 brig version)" "brig 0.2.0"
 
 echo "== model and effort policy"
 new_env cmux

@@ -5,6 +5,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-16
+
 ### Added
 - `brig --run <run-id> <command>` selects a run without an environment prefix, so a narrow Bash permission rule can match. The skill grants only its bundled `brig` script for the invoking turn; rebirth settings grant that script for the new session.
 - Doctor advises about the brigadier’s auto mode, including the interactive built-in default, using user/project/local settings read only. It prints a non-auto launch command and the exact scoped allow rule, and warns when openwong2kim/wmux runs non-bypass workers.

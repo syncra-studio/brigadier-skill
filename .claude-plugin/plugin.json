@@ -1,7 +1,7 @@
 {
   "name": "brigadier-skill",
   "displayName": "Brigadier",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Hand Claude Code a goal at night: Brigadier runs a crew of Claude Code (and optionally Codex) workers in cmux, tmux or wmux (Windows), answers them from your plan, rotates them before their context fills, and leaves a morning report.",
   "author": {
     "name": "Stephen Golban"
