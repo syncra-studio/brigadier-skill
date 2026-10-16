@@ -5,6 +5,8 @@ license: MIT
 compatibility: Claude Code on macOS, Linux or Windows (Git Bash) with jq and git, plus cmux or tmux (tmux is started in the background from a plain terminal) or, on Windows, wmux. Codex CLI optional. `/brigadier setup` checks and sets up all of it.
 argument-hint: <goal> | setup | resume [run-id] | doctor | config
 disable-model-invocation: true
+allowed-tools:
+  - 'Bash(bash "${CLAUDE_SKILL_DIR}/scripts/brig" *)'
 metadata:
   version: "0.1.0"
 ---
@@ -21,7 +23,7 @@ bash "${CLAUDE_SKILL_DIR}/scripts/brig" status      # written as `brig status` b
 
 Every `brig …` below means that same line with a different subcommand: `brig spawn w01 …` is `bash "${CLAUDE_SKILL_DIR}/scripts/brig" spawn w01 …`.
 
-After `brig init`, put the run id in front of **every** call: `BRIG_RUN=<run-id> bash "${CLAUDE_SKILL_DIR}/scripts/brig" …`. That keeps you on your own run even when other runs are live on the same machine.
+After `brig init`, select the run on **every** call: `bash "${CLAUDE_SKILL_DIR}/scripts/brig" --run <run-id> …`. That keeps you on your own run even when other runs are live on the same machine. Write the literal quoted script path on every call, without an environment prefix or a shell variable for the path, so the scoped Bash allow rule matches.
 
 Run state lives outside the repo, in `~/.claude/brigadier/runs/<run-id>/`: `goal.md`, `ledger.md`, `events.log`, `msgs/`, `config.env` (optional), and `workers/<wid>/` with `task.md`, `status`, `report.md`, `handoff.md` and hook state. Settings (models, effort ceiling, thresholds, terminal) come from `~/.claude/brigadier/config.env`; `brig config` shows them.
 
@@ -179,7 +181,7 @@ You speak for the user, so answer the way they would. Follow the plan, their sta
 
 ## 6. Recovery (after compaction or `/brigadier resume`)
 
-Re-read `<run>/goal.md` and `<run>/ledger.md`, run `brig status`, `brig check` and `tail -30 <run>/events.log`. Your old background `brig wait` died with the old session, so start a new one (§3). **If you were started by a rebirth** (your first prompt was `… resume <run-id>`), run `BRIG_RUN=<run-id> brig ack` right after starting that wait; the previous brigadier closes only after your ack. If the prompt names a note from the previous brigadier, read it before anything else.
+Re-read `<run>/goal.md` and `<run>/ledger.md`, run `brig status`, `brig check` and `tail -30 <run>/events.log`. Your old background `brig wait` died with the old session, so start a new one (§3). **If you were started by a rebirth** (your first prompt was `… resume <run-id>`), run `bash "${CLAUDE_SKILL_DIR}/scripts/brig" --run <run-id> ack` right after starting that wait; the previous brigadier closes only after your ack. If the prompt names a note from the previous brigadier, read it before anything else.
 
 For each live worker whose last turn ended unanswered, handle it as in §4. `brig check` compares each worker's busy flag with its screen: a restart or Esc cuts a turn off without the Stop hook, so the flag stays "busy" and `wait` stays silent. For every worker it marks INTERRUPTED, handle it as an `INTERRUPTED` event, and one it marks TRUST_PROMPT as a `TRUST_PROMPT` event. Then go back to the loop. Don't re-read the whole plan unless you need a phase's text.
 

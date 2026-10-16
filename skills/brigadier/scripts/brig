@@ -114,6 +114,13 @@ hhmm() {
   date -d "@$1" +%H:%M 2>/dev/null || date -r "$1" +%H:%M 2>/dev/null || echo "--:--"
 }
 
+# Select the run without an environment prefix, so a narrow Bash permission rule can match.
+if [[ "${1:-}" == --run ]]; then
+  [[ $# -ge 3 && -n "$2" && "$2" != -* ]] || die "usage: brig --run <run-id> <command> [args]"
+  export BRIG_RUN="$2"
+  shift 2
+fi
+
 # The Brigadier app runs its own overnight mode; this skill stays out of its sessions.
 case "${1:-help}" in
   help|-h|--help|version|--version) ;;
@@ -124,7 +131,7 @@ case "${1:-help}" in
 esac
 
 # ---- configuration ------------------------------------------------------------
-# Precedence: environment > <run>/config.env > ~/.claude/brigadier/config.env > defaults.
+# Precedence: environment > <run>/config.env > ~/.brigadier/config.env > defaults.
 BRIG_KEYS="BRIG_BACKEND BRIG_DEFAULT_MODEL BRIG_CHORE_MODEL BRIG_ALLOWED_MODELS BRIG_DEFAULT_EFFORT BRIG_MAX_EFFORT
 BRIG_MAX_WORKERS BRIG_CTX_PCT BRIG_CTX_TOKENS BRIG_SELF_TOKENS BRIG_STALL_MIN BRIG_IDLE_SEC BRIG_RATE_PCT BRIG_POLL
 BRIG_CODEX BRIG_CODEX_SANDBOX BRIG_REVIEWER BRIG_PERMISSION_MODE BRIG_CLAUDE_CONFIG_DIR BRIG_REBIRTH_TIMEOUT BRIG_TMUX_SOCKET BRIG_TMUX_MODE"
@@ -965,7 +972,8 @@ cmd_rebirth() {
   # Like a worker's own dir: the run dir is a working directory the new brigadier reads and edits
   # (ledger, messages) without a prompt.
   jq -n --argjson skip "$skip" --arg dir "$(native_path "$RUN")" --arg rread "$(path_rule Read "$RUN")" --arg redit "$(path_rule Edit "$RUN")" \
-    '{skipDangerousModePermissionPrompt: $skip, permissions: {additionalDirectories: [$dir], allow: [$rread, $redit]}}' >"$RUN/rebirth-settings.json"
+    --arg brig "Bash(bash \"$BRIG_SCRIPT\" *)" --arg native "Bash(bash \"$(native_path "$BRIG_SCRIPT")\" *)" \
+    '{skipDangerousModePermissionPrompt: $skip, permissions: {additionalDirectories: [$dir], allow: ([$rread, $redit] + ([$brig, $native] | unique))}}' >"$RUN/rebirth-settings.json"
   {
     echo '#!/usr/bin/env bash'
     echo "# Fresh brigadier for run $RUN_ID (written by brig rebirth)."
@@ -1282,6 +1290,32 @@ state_dir_note() {
   true
 }
 
+# Read only: infer the starting mode from user, project and local settings. The current
+# session may have a CLI override or a Shift+Tab change that no settings file can reveal.
+# Interactive Claude 2.1.283+ defaults to auto. A project/local auto resets to that built-in
+# default (it does not fall back to the user's mode); bypassPermissions there means Manual.
+auto_mode_note() {
+  local repo f mode=auto v disabled=""
+  repo="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+  for f in "$CFG_ROOT/settings.json" "$repo/.claude/settings.json" "$repo/.claude/settings.local.json"; do
+    [[ -f "$f" ]] || continue
+    v="$(jq -r '.permissions.disableAutoMode // empty' "$f" 2>/dev/null || true)"
+    [[ "$v" == disable ]] && disabled=1
+    v="$(jq -r '.permissions.defaultMode // empty' "$f" 2>/dev/null || true)"
+    [[ -n "$v" ]] || continue
+    if [[ "$f" != "$CFG_ROOT/settings.json" && "$v" == bypassPermissions ]]; then mode=default
+    else mode="$v"; fi
+  done
+  [[ -z "$disabled" ]] || mode=default
+  case "$mode" in
+    default|manual|acceptEdits|dontAsk|bypassPermissions|plan) ;;
+    *) warn "the brigadier may start in auto mode (the interactive default in Claude Code 2.1.283+). Its classifier can block brig commands overnight. Before starting a run, leave auto with Shift+Tab, or start claude --permission-mode default (or acceptEdits). Alternatively, add the narrow allow rule Bash(bash \"$(native_path "$BRIG_SCRIPT")\" *) to permissions.allow for the whole session (the skill grants it only for its invoking turn). Doctor reads settings only; it cannot see this session's mode" ;;
+  esac
+  if [[ "$BRIG_PERMISSION_MODE" == auto ]]; then
+    warn "BRIG_PERMISSION_MODE=auto also starts the reborn brigadier in auto; its classifier can block brig commands. Rebirth settings include a narrow allow rule for brig; choose a non-auto mode in $USER_CONFIG if auto still blocks it"
+  fi
+}
+
 cmd_doctor() {
   local bad=0 v b
   ok() { printf '  ok    %s\n' "$*"; }
@@ -1330,6 +1364,7 @@ cmd_doctor() {
   fi
   if mkdir -p "$BRIG_HOME" 2>/dev/null && [[ -w "$BRIG_HOME" ]]; then ok "state dir $BRIG_HOME"; else no "cannot write $BRIG_HOME (set BRIG_HOME to a writable dir)"; fi
   state_dir_note
+  auto_mode_note
   if [[ -f "$USER_CONFIG" ]]; then
     if (set +u; source_file "$USER_CONFIG") >/dev/null 2>&1; then ok "config $USER_CONFIG"; else no "config $USER_CONFIG has a shell syntax error"; fi
   else warn "no config file yet; defaults apply (/brigadier setup creates one to edit)"; fi
@@ -1473,6 +1508,7 @@ cmd_version() { echo "brig $BRIG_VERSION"; }
 cmd_help() {
   cat <<EOF
 brig $BRIG_VERSION: Brigadier worker control (runs live in $BRIG_HOME/runs)
+  --run <run-id> <command> ...    select a run for this call (also accepts BRIG_RUN)
   setup [--install [--yes] [--wmux-ow]]  set this machine up (prints install commands; runs them only with --install), then doctor
   doctor                          check this machine (terminal backend, claude, codex, jq, config)
   config                          effective settings and where each comes from

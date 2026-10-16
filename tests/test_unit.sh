@@ -70,6 +70,10 @@ expect_has "tab b is bound to its run" "$(CMUX_SURFACE_ID=tab-b brig run)" "$B"
 out="$(env -u CMUX_SURFACE_ID bash "$SKILL/scripts/brig" run 2>&1)"
 expect_has "an unbound session is refused, not guessed" "$out" "several runs are active"
 expect_has "BRIG_RUN picks explicitly" "$(env -u CMUX_SURFACE_ID BRIG_RUN="$A" bash "$SKILL/scripts/brig" run)" "$A"
+expect_has "--run overrides BRIG_RUN" "$(BRIG_RUN="$B" brig --run "$A" run)" "$A"
+expect_has "--run can precede help" "$(brig --run "$A" help)" "--run <run-id>"
+expect_has "--run still applies the app guard" "$(BRIGADIER_SESSION=1 brig --run "$A" doctor 2>&1)" "doesn't run inside the Brigadier app"
+expect_has "--run needs an id and command" "$(brig --run "$A" 2>&1)" "usage: brig --run"
 brig use "$A" >/dev/null
 expect_has "use binds a session" "$(brig run)" "$A"
 new_env tmux-bg
@@ -443,6 +447,11 @@ echo "note" >"$E_DIR/note.md"
 BRIG_REBIRTH_TIMEOUT=20 brig rebirth "C:/fake${E_DIR#"$T_ROOT"}/note.md" >/dev/null 2>&1
 B="$(cat "$R/rebirth.sh")"
 expect_has "a rebirth note given as a C:/ path reaches the successor as one" "$B" "C:/fake${E_DIR#"$T_ROOT"}/note.md"
+# shellcheck disable=SC2016 # jq variables
+check "Windows rebirth grants the literal quoted posix and native brig paths" jq -e \
+  --arg posix "Bash(bash \"$SKILL/scripts/brig\" *)" \
+  --arg native "Bash(bash \"$(cygpath -m "$SKILL/scripts/brig")\" *)" \
+  '.permissions.allow[2:] == ([$posix, $native] | unique)' "$R/rebirth-settings.json"
 expect_has "rebirth.sh keeps MSYS off the slash command" "$B" "export MSYS2_ARG_CONV_EXCL=/brigadier-skill:brigadier"
 expect_has "and still passes it to claude" "$B" "/brigadier-skill:brigadier\\ resume\\ $RID"
 check "the old tab closes after the ack" wait_for 10 grep -q "close-surface --force --surface $CMUX_SURFACE_ID" "$FAKE_TERM_DIR/log"
@@ -513,6 +522,30 @@ expect_has "and the moved run spawns workers in its new place" "$out" "dir=$H/.b
 CMUX_SURFACE_ID=movetest hb kill w01 >/dev/null
 expect_not "doctor has no more note" "$(hb doctor 2>&1)" "run state is still in"
 expect_has "a BRIG_HOME inside Claude Code's config dir gets a note" "$(BRIG_HOME="$H/cfg/elsewhere" CLAUDE_CONFIG_DIR="$H/cfg" bash "$SKILL/scripts/brig" doctor 2>&1)" "note  BRIG_HOME=$H/cfg/elsewhere is inside Claude Code's config dir"
+
+echo "== auto-mode advisory (Claude settings are read only)"
+new_env cmux
+expect_has "empty settings get the built-in auto advisory" "$(brig doctor 2>&1)" "the brigadier may start in auto mode"
+printf '%s\n' '{"permissions":{"defaultMode":"default"}}' >"$CLAUDE_CONFIG_DIR/settings.json"
+expect_not "a user non-auto mode needs no advisory" "$(brig doctor 2>&1)" "the brigadier may start in auto mode"
+mkdir -p .claude
+printf '%s\n' '{"permissions":{"defaultMode":"auto"}}' >.claude/settings.json
+expect_has "project auto uses the built-in default, overriding user default" "$(brig doctor 2>&1)" "the brigadier may start in auto mode"
+printf '%s\n' '{"permissions":{"defaultMode":"acceptEdits"}}' >.claude/settings.local.json
+expect_not "local acceptEdits takes precedence" "$(brig doctor 2>&1)" "the brigadier may start in auto mode"
+rm .claude/settings.local.json
+printf '%s\n' '{"permissions":{"defaultMode":"bypassPermissions"}}' >.claude/settings.json
+expect_not "project bypassPermissions starts Manual" "$(brig doctor 2>&1)" "the brigadier may start in auto mode"
+rm .claude/settings.json
+printf '%s\n' '{"permissions":{"defaultMode":"auto"}}' >"$CLAUDE_CONFIG_DIR/settings.json"
+cp "$CLAUDE_CONFIG_DIR/settings.json" "$E_DIR/settings-before.json"
+out="$(brig doctor 2>&1)"
+expect_has "user auto gets an advisory" "$out" "leave auto with Shift+Tab"
+expect_has "advisory gives an explicit launch mode" "$out" "claude --permission-mode default"
+check "doctor never writes Claude settings" cmp "$E_DIR/settings-before.json" "$CLAUDE_CONFIG_DIR/settings.json"
+printf '%s\n' '{"permissions":{"disableAutoMode":"disable"}}' >.claude/settings.json
+expect_not "disabled auto needs no advisory" "$(brig doctor 2>&1)" "the brigadier may start in auto mode"
+expect_has "rebirth auto gets its own advisory" "$(BRIG_PERMISSION_MODE=auto brig doctor 2>&1)" "BRIG_PERMISSION_MODE=auto also starts the reborn brigadier in auto"
 
 echo "== doctor"
 new_env cmux
@@ -715,10 +748,12 @@ fake_mode successor ack
 BRIG_REBIRTH_TIMEOUT=20 brig rebirth >/dev/null 2>&1
 expect_has "by default it bypasses permissions, like workers" "$(cat "$R/rebirth.sh")" "--permission-mode bypassPermissions"
 expect_has "without the bypass warning" "$(jq -c .skipDangerousModePermissionPrompt "$R/rebirth-settings.json")" 'true'
-expect_has "it reads and edits its run dir without a prompt" "$(jq -c .permissions "$R/rebirth-settings.json")" "{\"additionalDirectories\":[\"$R\"],\"allow\":[\"Read(/$R/**)\",\"Edit(/$R/**)\"]}"
+expect_has "it reads and edits its run dir without a prompt" "$(jq -c '{additionalDirectories: .permissions.additionalDirectories, allow: .permissions.allow[:2]}' "$R/rebirth-settings.json")" "{\"additionalDirectories\":[\"$R\"],\"allow\":[\"Read(/$R/**)\",\"Edit(/$R/**)\"]}"
 brig kill successor >/dev/null 2>&1
 printf 'BRIG_PERMISSION_MODE=manual\n' >"$BRIG_HOME/config.env"
 BRIG_REBIRTH_TIMEOUT=20 brig rebirth >/dev/null 2>&1
+# shellcheck disable=SC2016 # jq variable
+check "rebirth grants only the bundled brig command" jq -e --arg rule "Bash(bash \"$SKILL/scripts/brig\" *)" '.permissions.allow[2:] == [$rule]' "$R/rebirth-settings.json"
 expect_has "it follows BRIG_PERMISSION_MODE" "$(cat "$R/rebirth.sh")" "--permission-mode manual"
 expect_has "with no bypass setting" "$(jq -c .skipDangerousModePermissionPrompt "$R/rebirth-settings.json")" 'false'
 expect_has "doctor names the brigadier too" "$(brig doctor 2>&1)" "workers and the reborn brigadier: Claude manual"
