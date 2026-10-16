@@ -408,7 +408,7 @@ run_dir() {
   fi
   [[ "$r" == /* ]] || r="$BRIG_HOME/runs/$r"
   # A binding (or BRIG_RUN) from before the state dir moved still names the run by its old path.
-  if [[ ! -f "$r/run.env" && "$(basename "$(dirname "$r")")" == runs && -f "$BRIG_HOME/runs/$(basename "$r")/run.env" ]]; then
+  if [[ ! -f "$r/run.env" && "$(dirname "$r")" == "$OLD_HOME/runs" && -f "$BRIG_HOME/runs/$(basename "$r")/run.env" ]]; then
     r="$BRIG_HOME/runs/$(basename "$r")"
   fi
   [[ -d "$r" && -f "$r/run.env" ]] || die "run not found: $r"
@@ -484,7 +484,13 @@ clean_env_lines() {
 }
 # A Read or Edit permission rule for everything under <dir>. Rules take absolute paths as //path, and
 # Claude Code matches Windows paths in their /c/Users/… form, which is how Git Bash writes them.
-path_rule() { printf '%s(/%s/**)\n' "$1" "$(posix_path "$2")"; }
+path_rule() {
+  local p; p="$(posix_path "$2")"
+  # These are gitignore patterns: metacharacters in an actual directory name stay literal.
+  p="${p//\\/\\\\}"; p="${p//\[/\\[}"; p="${p//\]/\\]}"
+  p="${p//\*/\\*}"; p="${p//\?/\\?}"
+  printf '%s(/%s/**)\n' "$1" "$p"
+}
 # claude_settings_json <hook-command> <worker-dir> <effort>: effortLevel is the --effort the worker
 # starts with, so the two never disagree. Whatever the permission mode, the worker reads its task, the
 # run's messages and earlier handoffs, and writes its own control files without a prompt: its own dir
@@ -1146,20 +1152,25 @@ cmd_wait() {
         fi
       fi
       if busy "$d"; then
-        local tm it; tm="$(transcript_mtime "$d")"
+        local tm it input_ts; tm="$(transcript_mtime "$d")"
         # The idle clock also restarts when the worker asks for input: a dialog writes no transcript.
-        it="$(readf "$d/needs_input.ts" 0)"; [[ "$it" =~ ^[0-9]+$ ]] && (( it > tm )) || it="$tm"
+        input_ts="$(readf "$d/needs_input.ts" 0)"; it="$input_ts"
+        [[ "$it" =~ ^[0-9]+$ ]] && (( it > tm )) || it="$tm"
         if [[ "$(agent_of "$d")" == claude ]] && (( $(now) - it > BRIG_IDLE_SEC )) && [[ "$(readf "$d/.screen_flag")" != "$it" ]]; then
           local ss; ss="$(screen_state "$d")"
           # A screen between two states (a dialog just answered) looks idle for a moment: read it again.
           if [[ "$ss" == interrupted || "$ss" == idle ]]; then sleep 3; ss="$(screen_state "$d")"; fi
           case "$ss" in
             interrupted|idle)
-              echo "$it" >"$d/.screen_flag"
-              events+=("INTERRUPTED $w: marked busy but its screen is $ss (a cut-off turn fires no Stop hook); check 'brig screen $w', then tell it to clean up and continue") ;;
+              # Hooks or transcript activity during the second read invalidate the first snapshot.
+              if busy "$d" && [[ "$(transcript_mtime "$d")" == "$tm" && "$(readf "$d/needs_input.ts" 0)" == "$input_ts" ]]; then
+                echo "$it" >"$d/.screen_flag"
+                events+=("INTERRUPTED $w: marked busy but its screen is $ss (a cut-off turn fires no Stop hook); check 'brig screen $w', then tell it to clean up and continue")
+              fi ;;
           esac
         fi
-        if (( $(now) - tm > BRIG_STALL_MIN * 60 )) && [[ "$(readf "$d/.stall_flag")" != "$tm" ]]; then
+        tm="$(transcript_mtime "$d")"
+        if busy "$d" && (( $(now) - tm > BRIG_STALL_MIN * 60 )) && [[ "$(readf "$d/.stall_flag")" != "$tm" ]]; then
           echo "$tm" >"$d/.stall_flag"
           events+=("STALL $w: busy but no transcript activity for $(( ($(now) - tm) / 60 )) min; check 'brig screen $w'")
         fi

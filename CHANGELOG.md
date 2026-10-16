@@ -32,6 +32,9 @@ All notable changes to this project are documented here. The format follows
 - Doctor for openwong2kim/wmux says it was tested on a real PC with 4.3.0 (newer releases read from source up to 4.5.0).
 
 ### Fixed
+- Run migration remaps only the old state directory's paths; an unrelated missing run path is still an error.
+- Permission rules escape metacharacters in control-directory names, keeping Read/Edit grants scoped to the literal directory.
+- The second idle-screen read rechecks hooks and transcript activity, so a worker that finishes during the pause is not reported as interrupted or stalled.
 - Permission dialogs no longer look like idle/interrupted workers: NEEDS_INPUT refreshes their idle clock, screens recognize dialogs, and INTERRUPTED requires a second idle read.
 - openwong2kim/wmux errors name the method only once; backend documentation now says Escape can deny a worker permission dialog, while approvals need the user.
 - Windows (Git Bash):

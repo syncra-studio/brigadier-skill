@@ -165,6 +165,19 @@ expect_has "send --file types a pointer to the file" "$(cat "$FAKE_TERM_DIR/log"
 brig kill w01 >/dev/null; brig finish "done" >/dev/null
 unset BRIG_RUN
 
+echo "== control directory names are literal permission paths"
+new_env cmux
+export BRIG_HOME="$E_DIR/home [abc]?*/brigadier"; mkdir -p "$BRIG_HOME/fake-modes"
+RID="$(run_id_of "$(brig init literal)")"; export BRIG_RUN="$RID"
+brig spawn w01 "$E_DIR/task.md" >/dev/null
+# shellcheck disable=SC2016 # jq variables
+check "path metacharacters cannot widen the worker's Read/Edit grant" jq -e \
+  --arg r "Read(/$E_DIR/home \\[abc\\]\\?\\*/brigadier/runs/$RID/**)" \
+  --arg e "Edit(/$E_DIR/home \\[abc\\]\\?\\*/brigadier/runs/$RID/workers/w01/**)" \
+  '.permissions.allow == [$r, $e]' "$BRIG_HOME/runs/$RID/workers/w01/settings.json"
+brig kill w01 >/dev/null; brig finish "done" >/dev/null
+unset BRIG_RUN
+
 echo "== wmux: quoting, input and rebirth"
 new_env wmux
 export BRIG_HOME="$E_DIR/it's here/brigadier"; mkdir -p "$BRIG_HOME/fake-modes"
@@ -283,6 +296,10 @@ out="$(BRIG_IDLE_SEC=1 brig wait 15)"
 expect_has "a cut-off turn still raises INTERRUPTED" "$out" "INTERRUPTED w01: marked busy but its screen is interrupted"
 out="$(BRIG_IDLE_SEC=1 brig wait 5)"
 expect_not "once" "$out" "INTERRUPTED"
+brig send w01 'finish during idle recheck' >/dev/null; sleep 1
+out="$(BRIG_IDLE_SEC=0 brig wait 15)"
+expect_not "a Stop during the second screen read prevents INTERRUPTED" "$out" "INTERRUPTED"
+expect_has "the completed turn still raises TURN_END" "$out" "TURN_END w01 status=done"
 brig kill w01 >/dev/null
 unset BRIG_RUN
 
@@ -516,6 +533,9 @@ expect_has "after the move, ~/.brigadier is used" "$(hb config)" "user config: $
 expect_has "with the same config" "$(hb config)" "BRIG_CTX_PCT           44                       user"
 expect_has "the old binding finds the moved run" "$(CMUX_SURFACE_ID=movetest hb run)" "$H/.brigadier/runs/$oid"
 expect_has "so does a BRIG_RUN with the old path" "$(BRIG_RUN="$OLD/runs/$oid" hb status 2>&1)" "WID"
+out="$(BRIG_RUN="$H/unrelated/runs/$oid" hb run 2>&1)"; code=$?
+check "an unrelated missing path never selects a same-named run" test "$code" -ne 0
+expect_has "it reports the requested path as missing" "$out" "run not found: $H/unrelated/runs/$oid"
 expect_has "resume works" "$(hb use "$oid")" "$H/.brigadier/runs/$oid"
 out="$(CMUX_SURFACE_ID=movetest hb spawn w01 "$E_DIR/task.md" 2>&1)"
 expect_has "and the moved run spawns workers in its new place" "$out" "dir=$H/.brigadier/runs/$oid/workers/w01"
