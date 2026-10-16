@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- `brig --run <run-id> <command>` selects a run without an environment prefix, so a narrow Bash permission rule can match. The skill grants only its bundled `brig` script for the invoking turn; rebirth settings grant that script for the new session.
+- Doctor advises about the brigadier’s auto mode, including the interactive built-in default, using user/project/local settings read only. It prints a non-auto launch command and the exact scoped allow rule, and warns when openwong2kim/wmux runs non-bypass workers.
 - `/brigadier setup`: the one setup step after installing. It checks git, jq, claude, the terminal and codex, and prints the exact install command for your OS (macOS, Debian/Ubuntu, Fedora, Arch, Alpine, openSUSE, Windows with winget). It runs that command only with `--install` and your confirmation. It also creates a commented-out config.env and fixes Windows line endings, then runs doctor.
 - Windows support through Git Bash, with two wmux backends: `wmux` for amirlehmam/wmux (recommended) and `wmux-ow` for openwong2kim/wmux (fallback, driven over its RPC pipe through PowerShell). The right one is picked automatically, and doctor names the one it found and its version.
 - `brig send <wid> --file <path>` for long answers; inline messages over 2000 characters are refused with a pointer to it.
@@ -16,7 +18,10 @@ All notable changes to this project are documented here. The format follows
 - `brig runs` shows each run's repo and the first line of its goal, and lists every unfinished run (finished ones up to 30 rows); `--here` lists this repo's runs only and `--overlap` names other runs on the same repo that were active during this one (REPORT.md mentions them under Problems).
 
 ### Changed
-- **Codex workers now run in Codex's `workspace-write` sandbox by default** (network on; the repo, its real git dirs and the worker's control dir writable, so commits work in worktrees too). Set `BRIG_CODEX_SANDBOX=bypass` for the old unsandboxed behaviour. `BRIG_PERMISSION_MODE` now applies to Claude workers only.
+- Default state and config move to `~/.brigadier`, outside Claude Code’s protected config directory. When only the old `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/brigadier` exists it stays in use; doctor prints a manual move command. `BRIG_HOME` wins, and old absolute bindings still resolve after a move. Nothing moves automatically.
+- Generated worker settings allow reading the run and editing only the worker’s own control directory, so task reads and status/report writes need no approval in acceptEdits or Manual outside protected paths. The reborn brigadier gets its run directory too.
+- The playbook takes ledger times from `date +%H:%M` or `events.log`, and never retries wmux’s refusal to approve a worker dialog; Escape denies only when the rules require denial.
+- **Codex workers now run in Codex's `workspace-write` sandbox by default** (network on; the repo, its real git dirs and the worker's control dir writable, so commits work in worktrees too). Set `BRIG_CODEX_SANDBOX=bypass` for the old unsandboxed behaviour. `BRIG_PERMISSION_MODE` applies to Claude workers and the reborn brigadier.
 - Codex workers accept queued messages only with their per-worker token, strip control characters, cap them at 8 KB and frame them as the brigadier's message.
 - README: install is two steps (install the skill, then `/brigadier setup`).
 - A bare `/brigadier resume` resumes the only unfinished run of this repo if it has a goal; otherwise it lists the runs and asks which one. `resume <run-id>` and rebirth never ask.
@@ -24,9 +29,11 @@ All notable changes to this project are documented here. The format follows
 - A run's `config.env` may tighten `BRIG_MAX_EFFORT` and `BRIG_ALLOWED_MODELS` but no longer loosen them; `brig config` shows what it ignored.
 - The reborn brigadier follows `BRIG_PERMISSION_MODE`, like workers, and the user's own default model rather than the run's, at an effort no higher than `BRIG_MAX_EFFORT`. Doctor and the Guardrails say so.
 - `/brigadier` starts with `brig init` in a Bash call of its own and reads CLAUDE.md, AGENTS.md and project memory with the Read tool, so a missing file is no error.
-- Doctor for openwong2kim/wmux says it was tested on a real PC with 4.3.0 (source read at 4.5.0).
+- Doctor for openwong2kim/wmux says it was tested on a real PC with 4.3.0 (newer releases read from source up to 4.5.0).
 
 ### Fixed
+- Permission dialogs no longer look like idle/interrupted workers: NEEDS_INPUT refreshes their idle clock, screens recognize dialogs, and INTERRUPTED requires a second idle read.
+- openwong2kim/wmux errors name the method only once; backend documentation now says Escape can deny a worker permission dialog, while approvals need the user.
 - Windows (Git Bash):
   - `.gitattributes` keeps every file LF, so a checkout with `core.autocrlf` no longer breaks the scripts.
   - jq runs with `-b`, so its output has no CR.

@@ -3,7 +3,7 @@
 ## What Brigadier is, security-wise
 
 Brigadier starts Claude Code and, optionally, Codex sessions on your machine and lets them work unattended. The defaults differ by agent:
-- **Claude workers**, and the fresh brigadier session a rebirth starts, run with permissions bypassed (`BRIG_PERMISSION_MODE=bypassPermissions`), so they can run any command your user account can. Set a stricter mode to have prompts reach the brigadier instead.
+- **Claude workers**, and the fresh brigadier session a rebirth starts, run with permissions bypassed (`BRIG_PERMISSION_MODE=bypassPermissions`), so they can run any command your user account can. Set a stricter mode to have prompts reach the brigadier instead; openwong2kim/wmux permits only Escape at a worker permission dialog, so approvals need you in the pane.
 - **Codex workers** run in Codex's `workspace-write` sandbox (`BRIG_CODEX_SANDBOX=workspace-write`): they can write the repo, its git dirs and their own control dir, with network on and no prompts. `BRIG_CODEX_SANDBOX=bypass` turns the sandbox off. A Codex worker accepts queued messages only when they carry its per-worker inbox token, which only `brig send` writes; other files are refused and reported to the brigadier.
 
 `brig doctor` prints both settings. See "Safety & cost" in the README.
@@ -11,7 +11,8 @@ Brigadier starts Claude Code and, optionally, Codex sessions on your machine and
 Brigadier itself:
 - runs your own, unmodified `claude` and `codex` binaries, and never handles, stores or forwards your credentials or tokens;
 - makes no network requests of its own (on Windows with openwong2kim/wmux it talks to that app's local named pipe, using the app's own auth token file);
-- keeps all run state in `~/.claude/brigadier/` on your machine;
+- keeps run state in `~/.brigadier/` on your machine (`BRIG_HOME` overrides it; an existing old state directory remains in use until you move it);
+- reads Claude user, project and local settings only to advise about auto mode; never writes those settings. The skill grants only `Bash(bash "${CLAUDE_SKILL_DIR}/scripts/brig" *)` for its invoking turn, and generated rebirth settings grant the same script for that new session. Worker settings allow reading the run and editing only the worker’s own control directory; rebirth settings allow reading and editing that run;
 - only reads Claude Code's `.claude.json` (to warn at spawn about a folder Claude Code hasn't trusted) and never writes it. The brigadier accepts a worker's "trust this folder" dialog only for the run's own repo, or a worktree or subfolder of it; any other folder is left for you.
 
 `brig setup` (`/brigadier setup`):

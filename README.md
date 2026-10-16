@@ -31,17 +31,17 @@ Or as a Claude Code plugin:
 
 Pick one of the two. Either way you get the `/brigadier` command (as a plugin it's also `/brigadier-skill:brigadier`).
 
-**2. In Claude Code, run `/brigadier setup`.** That's the only setup step. On Windows, run it in a wmux tab; if you don't have wmux yet, setup tells you which one to get (see [Windows](#faq)). It checks `git`, `jq`, `claude`, your terminal (cmux or tmux; wmux on Windows) and the optional `codex`. Then it creates a commented-out `~/.claude/brigadier/config.env`, fixes Windows line endings in the skill's files, and finishes by running `/brigadier doctor`. Anything missing comes back as one exact command for your system (`brew install …`, `sudo apt install …`, `winget install …`). Setup runs those commands only when you say yes; a `sudo` command that would need your password is left for you to type. It's safe to run again at any time.
+**2. In Claude Code, run `/brigadier setup`.** That's the only setup step. On Windows, run it in a wmux tab; if you don't have wmux yet, setup tells you which one to get (see [Windows](#faq)). It checks `git`, `jq`, `claude`, your terminal (cmux or tmux; wmux on Windows) and the optional `codex`. Then it creates a commented-out `~/.brigadier/config.env`, fixes Windows line endings in the skill's files, and finishes by running `/brigadier doctor`. Anything missing comes back as one exact command for your system (`brew install …`, `sudo apt install …`, `winget install …`). Setup runs those commands only when you say yes; a `sudo` command that would need your password is left for you to type. It's safe to run again at any time.
 
 ## 60-second quick start
 
-1. In Claude Code, run **`/brigadier setup`** (see Install). Later, `/brigadier doctor` re-checks the machine without changing anything.
+1. In Claude Code, run **`/brigadier setup`** (see Install) and read its notes about auto mode and any old state directory. Later, `/brigadier doctor` re-checks the machine; it never edits your Claude settings.
 2. Try a tiny goal in a scratch repo:
    ```text
    /brigadier In this repo, add hello.txt containing "hi" and commit it. One phase only; stop after it.
    ```
 3. Watch a worker open in a new tab (cmux, wmux), a new window (tmux), or a background tmux session. The brigadier tells you the `tmux attach -t brigadier-<slug>` line to watch it, and `Ctrl-b d` leaves without stopping anything.
-4. When it's done, read `~/.claude/brigadier/runs/<run-id>/REPORT.md`. To continue a run later, use `/brigadier resume`: with one unfinished run in this repo it picks that one up, otherwise it lists the runs and asks.
+4. When it's done, read `~/.brigadier/runs/<run-id>/REPORT.md`. To continue a run later, use `/brigadier resume`: with one unfinished run in this repo it picks that one up, otherwise it lists the runs and asks.
 
 Then give it a real night's work. Good goals look like this:
 
@@ -63,7 +63,7 @@ flowchart LR
   you([You, before bed]) -->|/brigadier goal| B[Brigadier session]
   B -->|brig spawn| W1[Worker w01<br/>Claude Code]
   B -->|brig spawn| W2[Worker w02<br/>Claude Code or Codex]
-  W1 -. hooks: turn end, context %, prompts .-> S[(run state<br/>~/.claude/brigadier)]
+  W1 -. hooks: turn end, context %, prompts .-> S[(run state<br/>~/.brigadier)]
   W2 -. hooks .-> S
   S -->|brig wait wakes it| B
   B -->|answers, handoffs,<br/>reviews| W1
@@ -101,10 +101,11 @@ No tmux? `/brigadier setup` prints the one-line install for your system (`brew i
 
 ## Configuration
 
-All settings live in one file, `~/.claude/brigadier/config.env`. `/brigadier setup` creates it from [`config.example.env`](skills/brigadier/config.example.env) with every setting commented out; uncomment what you want to change. A run can override settings in `<run>/config.env`, and environment variables override both. A run may tighten `BRIG_MAX_EFFORT` and `BRIG_ALLOWED_MODELS` but never loosen them. `/brigadier doctor` checks the file, and `/brigadier config` shows the effective values and where each one came from.
+All settings live in one file, `~/.brigadier/config.env`. `/brigadier setup` creates it from [`config.example.env`](skills/brigadier/config.example.env) with every setting commented out; uncomment what you want to change. A run can override settings in `<run>/config.env`, and environment variables override both. A run may tighten `BRIG_MAX_EFFORT` and `BRIG_ALLOWED_MODELS` but never loosen them. `/brigadier doctor` checks the file, and `/brigadier config` shows the effective values and where each one came from.
 
 | Setting | Default | What it does |
 |---|---|---|
+| `BRIG_HOME` | `~/.brigadier` | state and config directory; set in the environment, with an old-directory fallback (see FAQ) |
 | `BRIG_BACKEND` | `auto` | `cmux`, `tmux`, `wmux`, `wmux-ow`, or auto-detect |
 | `BRIG_DEFAULT_MODEL` | `opus` | model for workers; the reborn brigadier uses the value from this file or the environment (a model named in the goal covers the workers only, and keeps Codex workers out unless the goal names Codex) |
 | `BRIG_CHORE_MODEL` | `sonnet` | model suggested for mechanical chores |
@@ -124,12 +125,13 @@ All settings live in one file, `~/.claude/brigadier/config.env`. `/brigadier set
 
 Read this before your first night.
 
-- **Claude workers run unattended with permissions bypassed by default** (`--permission-mode bypassPermissions`). So does the fresh brigadier session a rebirth starts, whatever mode you started the first one in, because nobody is there to approve its prompts. That's what lets work continue while you sleep, and it means a Claude worker can run any command your user account can. Run Brigadier on repos and machines where that's acceptable. To be stricter, set `BRIG_PERMISSION_MODE` to `acceptEdits`, `auto`, `dontAsk` or `manual`. Prompts then reach the brigadier, which approves only what its rules allow.
+- **Claude workers run unattended with permissions bypassed by default** (`--permission-mode bypassPermissions`). So does the fresh brigadier session a rebirth starts, whatever mode you started the first one in, because nobody is there to approve its prompts. That's what lets work continue while you sleep, and it means a Claude worker can run any command your user account can. Run Brigadier on repos and machines where that's acceptable. To be stricter, set `BRIG_PERMISSION_MODE` to `acceptEdits`, `auto`, `dontAsk` or `manual`. Workers get permission to read their run and write their own control files; other prompts reach the brigadier, which approves only what its rules allow. With openwong2kim/wmux, approvals need you in the worker tab (see Windows below).
+- **Check the brigadier’s auto mode.** Interactive [Claude Code 2.1.283+ starts in auto by default](https://code.claude.com/docs/en/permission-modes#which-mode-a-session-starts-in); its classifier can block `brig` calls overnight. Doctor warns unless settings show another starting mode, and only reads Claude settings. Leave auto with Shift+Tab before starting, or launch `claude --permission-mode default` or `acceptEdits`. The [skill grant](https://code.claude.com/docs/en/skills#pre-approve-tools-for-a-skill) covers the exact bundled `brig` command for its invoking turn; a new user message clears that grant, and background wake-ups may also need a persistent rule. To keep it allowed for a whole session in auto, add the narrow Bash rule doctor prints to `permissions.allow` yourself. The quoted `bash "<skill>/scripts/brig" --run <id> …` form is required; no environment prefix. This rule was tested with Claude 2.1.301 on macOS; if it still blocks a call, leave auto. Rebirth settings include it for the new brigadier.
 - **Folder trust stays yours.** A worker in a folder Claude Code hasn't trusted yet stops at its "trust this folder" dialog. `brig spawn` warns about that up front (it reads Claude Code's `.claude.json` and never writes it), and the brigadier accepts the dialog only for the run's own repo or a worktree or subfolder of it.
 - **Codex workers run in Codex's sandbox by default** (`BRIG_CODEX_SANDBOX=workspace-write`). They can write the repo, its git dirs and their own control dir, with network on and no prompts. `BRIG_CODEX_SANDBOX=bypass` runs them without the sandbox. Messages to a Codex worker are accepted only from `brig send`, which signs each one with a per-worker token; anything else dropped in its inbox is refused and reported. `/brigadier doctor` prints both settings.
 - **Its rules forbid pushing, publishing, deploying, spending money, signing up for anything or contacting anyone on your behalf.** Workers stub those and the report lists them under "Waiting on you". The worker protocol also bans killing processes by name and deleting other runs' scratch files. These are instructions the sessions follow, not a sandbox: with permissions bypassed, nothing technically stops a worker that ignores them.
 - **It uses your own subscription quota.** Every worker is a normal Claude Code (or Codex) session on your account, so a night of work uses your plan's limits like a day of work would. When the 5-hour window passes `BRIG_RATE_PCT` (95%), the brigadier stops starting Claude workers and waits for the reset. If you also run the Brigadier app at the same time, both share that one subscription's 5-hour window.
-- **It drives your own, unmodified `claude` and `codex` binaries in your own terminal.** No tokens are shared or proxied, there's no API intermediary, and nothing is sent anywhere except by those official CLIs. Run state stays in `~/.claude/brigadier/` on your machine.
+- **It drives your own, unmodified `claude` and `codex` binaries in your own terminal.** No tokens are shared or proxied, there's no API intermediary, and nothing is sent anywhere except by those official CLIs. Run state stays in `~/.brigadier/` on your machine.
 - **Keep the machine awake.** A sleeping laptop stops the run. On macOS, `caffeinate -dimsu` in a spare tab works.
 
 ## FAQ
@@ -148,11 +150,11 @@ Read this before your first night.
 
 **Windows?** Yes, with Git for Windows and wmux. Claude Code runs its shell commands through Git Bash, and Brigadier needs that Bash; `winget install --id Git.Git -e --source winget` installs it. Workers open as wmux tabs, so start Claude Code inside wmux:
 - [amirlehmam/wmux](https://github.com/amirlehmam/wmux) is the recommended one. Download the setup `.exe` from its [releases](https://github.com/amirlehmam/wmux/releases/latest) (Brigadier is tested against 2.24.0).
-- [openwong2kim/wmux](https://github.com/openwong2kim/wmux) works as the fallback: `winget install --id openwong2kim.wmux -e --source winget` (tested on a real PC with 4.3.0; the backend was written against the 4.5.0 source). Brigadier drives it through its RPC pipe with PowerShell. Tabs keep wmux's own titles there, and only tabs in your current workspace are tracked. Its approval gate refuses keys at a numbered permission prompt unless you let automation answer approvals in that workspace, so with a stricter `BRIG_PERMISSION_MODE` such a prompt waits for you.
+- [openwong2kim/wmux](https://github.com/openwong2kim/wmux) works as the fallback: `winget install --id openwong2kim.wmux -e --source winget` (tested on a real PC with 4.3.0; newer releases read from source up to 4.5.0). Brigadier drives it through its RPC pipe with PowerShell. Tabs keep wmux's own titles there, and only tabs in your current workspace are tracked. At a worker’s own permission dialog, wmux 4.3.0 permits only Escape (deny): Brigadier cannot approve it, so with non-bypass workers every approval waits for you in the pane.
 
-Then run `/brigadier setup` in a wmux tab. It finds `jq` and the other tools winget installed even before a restart, and tells you when wmux or Claude Code needs one. Brigadier picks the right wmux by itself; `BRIG_BACKEND=wmux` or `wmux-ow` forces one. The Windows support has run on a real PC with openwong2kim/wmux 4.3.0; amirlehmam/wmux is tested only with a fake so far, so please report what you run into. Codex on Windows hasn't been tried with Brigadier.
+Then run `/brigadier setup` in a wmux tab. It finds `jq` and the other tools winget installed even before a restart, and tells you when wmux or Claude Code needs one. Brigadier picks the right wmux by itself; `BRIG_BACKEND=wmux` or `wmux-ow` forces one. The Windows support has run on a real PC with openwong2kim/wmux 4.3.0; amirlehmam/wmux is tested only with a fake so far, so please report what you run into. The Codex worker and its 5-hour-window display also passed the second real-PC test.
 
-**Where does state live, and how do I uninstall?** Runs live in `~/.claude/brigadier/runs/`. Remove the skill with `npx skills remove -g brigadier`, or with `/plugin uninstall brigadier-skill@brigadier-skill`. Then delete `~/.claude/brigadier/` if you want the run history gone.
+**Where does state live, and how do I uninstall?** Runs live in `~/.brigadier/runs/`. `BRIG_HOME` overrides that location. If only the old `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/brigadier` exists, Brigadier keeps using it; doctor prints the exact `mv` command to move it to `~/.brigadier` when no run is active. Nothing moves automatically, and config, runs and bindings keep working after the move. State belongs outside Claude’s protected config directory so non-bypass workers can write their own status and report without prompts. Remove the skill with `npx skills remove -g brigadier`, or with `/plugin uninstall brigadier-skill@brigadier-skill`. Then delete `~/.brigadier/` if you want the run history gone.
 
 **Does it work inside the Brigadier app?** No, on purpose. The app has its own Overnight mode, and the skill stops with a one-line pointer to it.
 
