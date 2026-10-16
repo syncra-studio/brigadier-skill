@@ -11,7 +11,6 @@ BRIG_VERSION="0.1.0"
 SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BRIG_SCRIPT="$SKILL_DIR/scripts/brig"
 CFG_ROOT="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
-BRIG_HOME="${BRIG_HOME:-$CFG_ROOT/brigadier}"
 
 die() { echo "brig: $*" >&2; exit 1; }
 now() { date +%s; }
@@ -93,7 +92,16 @@ source_file() {
   rm -f "$_t"; return "$_rc"
 }
 # CLAUDE_CONFIG_DIR may be set the Windows way (C:\Users\…\.claude).
-if is_windows; then CFG_ROOT="$(posix_path "$CFG_ROOT")"; BRIG_HOME="$(posix_path "$BRIG_HOME")"; fi
+if is_windows; then CFG_ROOT="$(posix_path "$CFG_ROOT")"; fi
+# Run state and config live in ~/.brigadier. Claude Code protects its own config dir: a worker that
+# isn't in bypassPermissions is asked before every write there, its status and report files included.
+# Earlier versions used <Claude config dir>/brigadier; while only that one exists, it stays in use
+# (doctor says how to move it).
+NEW_HOME="$HOME/.brigadier"; OLD_HOME="$CFG_ROOT/brigadier"
+if [[ -n "${BRIG_HOME:-}" ]]; then BRIG_HOME_SRC="env"
+elif [[ ! -d "$NEW_HOME" && -d "$OLD_HOME" ]]; then BRIG_HOME="$OLD_HOME"; BRIG_HOME_SRC=old
+else BRIG_HOME="$NEW_HOME"; BRIG_HOME_SRC=default; fi
+if is_windows; then BRIG_HOME="$(posix_path "$BRIG_HOME")"; fi
 # On Windows a path may come as C:/… or C:\…; posix_path turns it into /c/… first.
 abspath() { local p; p="$(posix_path "$1")"; if [[ "$p" == /* ]]; then echo "$p"; else echo "$PWD/$p"; fi; }
 if stat -c %Y / >/dev/null 2>&1; then
@@ -392,6 +400,10 @@ run_dir() {
     esac
   fi
   [[ "$r" == /* ]] || r="$BRIG_HOME/runs/$r"
+  # A binding (or BRIG_RUN) from before the state dir moved still names the run by its old path.
+  if [[ ! -f "$r/run.env" && "$(basename "$(dirname "$r")")" == runs && -f "$BRIG_HOME/runs/$(basename "$r")/run.env" ]]; then
+    r="$BRIG_HOME/runs/$(basename "$r")"
+  fi
   [[ -d "$r" && -f "$r/run.env" ]] || die "run not found: $r"
   echo "$r"
 }
@@ -463,14 +475,21 @@ clean_env_lines() {
   echo 'unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_SESSION_ID CLAUDE_CODE_SSE_PORT BRIG_WORKER BRIG_WORKER_DIR'
   if [[ -n "$BRIG_CLAUDE_CONFIG_DIR" ]]; then echo "export CLAUDE_CONFIG_DIR=$(q "$BRIG_CLAUDE_CONFIG_DIR")"; fi
 }
+# A Read or Edit permission rule for everything under <dir>. Rules take absolute paths as //path, and
+# Claude Code matches Windows paths in their /c/Users/… form, which is how Git Bash writes them.
+path_rule() { printf '%s(/%s/**)\n' "$1" "$(posix_path "$2")"; }
 # claude_settings_json <hook-command> <worker-dir> <effort>: effortLevel is the --effort the worker
-# starts with, so the two never disagree.
+# starts with, so the two never disagree. Whatever the permission mode, the worker reads its task, the
+# run's messages and earlier handoffs, and writes its own control files without a prompt: its own dir
+# is a working directory and editable, the rest of the run is readable. Nothing else is granted.
 claude_settings_json() {
   local hook="$1" d="$2" eff="$3" skip=false
   [[ "$BRIG_PERMISSION_MODE" == bypassPermissions ]] && skip=true
-  jq -n --arg h "$hook" --arg d "$(q "$d")" --argjson allowed "$(allowed_json)" --arg eff "$eff" --argjson skip "$skip" '{
+  jq -n --arg h "$hook" --arg d "$(q "$d")" --argjson allowed "$(allowed_json)" --arg eff "$eff" --argjson skip "$skip" \
+    --arg dir "$(native_path "$d")" --arg rread "$(path_rule Read "$RUN")" --arg redit "$(path_rule Edit "$d")" '{
     effortLevel: $eff,
     skipDangerousModePermissionPrompt: $skip,
+    permissions: {additionalDirectories: [$dir], allow: [$rread, $redit]},
     statusLine: {type: "command", command: "\($h) statusline \($d)"},
     hooks: {
       SessionStart:     [{hooks: [{type: "command", command: "\($h) session \($d)"}]}],
@@ -943,7 +962,10 @@ cmd_rebirth() {
   if (( $(effort_rank "$effort") == 0 || $(effort_rank "$effort") > $(effort_rank "$BRIG_MAX_EFFORT") )); then effort="$BRIG_MAX_EFFORT"; fi
   check_effort "$effort"
   local skip=false; [[ "$BRIG_PERMISSION_MODE" == bypassPermissions ]] && skip=true
-  jq -n --argjson skip "$skip" '{skipDangerousModePermissionPrompt: $skip}' >"$RUN/rebirth-settings.json"
+  # Like a worker's own dir: the run dir is a working directory the new brigadier reads and edits
+  # (ledger, messages) without a prompt.
+  jq -n --argjson skip "$skip" --arg dir "$(native_path "$RUN")" --arg rread "$(path_rule Read "$RUN")" --arg redit "$(path_rule Edit "$RUN")" \
+    '{skipDangerousModePermissionPrompt: $skip, permissions: {additionalDirectories: [$dir], allow: [$rread, $redit]}}' >"$RUN/rebirth-settings.json"
   {
     echo '#!/usr/bin/env bash'
     echo "# Fresh brigadier for run $RUN_ID (written by brig rebirth)."
@@ -1250,6 +1272,16 @@ claude_install_hint() {
   else echo "Install Claude Code: see $CLAUDE_INSTALL_HINT"; fi
 }
 
+# Run state inside Claude Code's config dir: writes there always ask outside bypassPermissions.
+state_dir_note() {
+  case "$BRIG_HOME_SRC" in
+    old) warn "run state is still in $OLD_HOME, inside Claude Code's config dir, where workers outside bypassPermissions are asked before every write to their own status and report files. When no run is active, move it: mv $(q "$OLD_HOME") $(q "$NEW_HOME") (runs, config and bindings keep working)" ;;
+    env) [[ "$BRIG_HOME/" == "$CFG_ROOT/"* ]] \
+           && warn "BRIG_HOME=$BRIG_HOME is inside Claude Code's config dir ($CFG_ROOT), where workers outside bypassPermissions are asked before every write to their own control files; point it elsewhere" ;;
+  esac
+  true
+}
+
 cmd_doctor() {
   local bad=0 v b
   ok() { printf '  ok    %s\n' "$*"; }
@@ -1297,6 +1329,7 @@ cmd_doctor() {
     no "no terminal backend: $(no_terminal_msg)"
   fi
   if mkdir -p "$BRIG_HOME" 2>/dev/null && [[ -w "$BRIG_HOME" ]]; then ok "state dir $BRIG_HOME"; else no "cannot write $BRIG_HOME (set BRIG_HOME to a writable dir)"; fi
+  state_dir_note
   if [[ -f "$USER_CONFIG" ]]; then
     if (set +u; source_file "$USER_CONFIG") >/dev/null 2>&1; then ok "config $USER_CONFIG"; else no "config $USER_CONFIG has a shell syntax error"; fi
   else warn "no config file yet; defaults apply (/brigadier setup creates one to edit)"; fi

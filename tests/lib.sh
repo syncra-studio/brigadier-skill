@@ -59,7 +59,7 @@ new_env() {
   unset BRIG_RUN BRIG_WORKER BRIG_WORKER_DIR CLAUDECODE
   local k; for k in $(env | sed -n 's/^\(BRIG_[A-Z_]*\)=.*/\1/p'); do unset "$k"; done
   export CLAUDE_CONFIG_DIR="$E_DIR/home"
-  export BRIG_HOME="$E_DIR/home/brigadier"
+  export BRIG_HOME="$E_DIR/brigadier"
   export BRIG_POLL=1 FAKE_LOG="$E_DIR/fake.log" FAKE_TERM_DIR="$T_ROOT/term"
   export FAKE_BRIG="$SKILL/scripts/brig"
   mkdir -p "$BRIG_HOME/fake-modes"

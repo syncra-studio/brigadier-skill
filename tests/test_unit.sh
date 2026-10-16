@@ -42,6 +42,9 @@ expect_has "refuses an unknown permission mode" "$out" "BRIG_PERMISSION_MODE 'yo
 out="$(BRIG_PERMISSION_MODE=acceptEdits brig spawn w05 "$E_DIR/task.md" 2>&1)"
 expect_has "stricter permission mode reaches the worker" "$(cat "$R/workers/w05/launch.sh")" "--permission-mode acceptEdits"
 expect_has "and drops the bypass dialog skip" "$(jq -c .skipDangerousModePermissionPrompt "$R/workers/w05/settings.json")" "false"
+expect_has "a worker's own dir is a working directory" "$(jq -c .permissions.additionalDirectories "$R/workers/w05/settings.json")" "[\"$R/workers/w05\"]"
+expect_has "it may read the run and edit only its own dir" "$(jq -c .permissions.allow "$R/workers/w05/settings.json")" "[\"Read(/$R/**)\",\"Edit(/$R/workers/w05/**)\"]"
+expect_has "rules use the //absolute form" "$(jq -r '.permissions.allow[0]' "$R/workers/w05/settings.json")" "Read(//"
 for w in w01 w02 w05; do brig kill "$w" >/dev/null 2>&1; done
 unset BRIG_RUN
 
@@ -429,6 +432,8 @@ expect_has "the kickoff names task.md as a Windows path" "$L" "Read\\ $win/worke
 expect_has "--settings gets a Windows path" "$L" "--settings $win/workers/w01/settings.json"
 expect_has "the worker gets the brigadier's PATH" "$L" "export PATH="
 expect_has "the protocol shows Windows paths" "$(cat "$R/workers/w01/task.md")" "Your private directory: \`$win/workers/w01\`"
+expect_has "the worker's own dir is added as a Windows path" "$(jq -c .permissions.additionalDirectories "$S")" "[\"$win/workers/w01\"]"
+expect_has "and its rules use the bash form of the path" "$(jq -c .permissions.allow "$S")" "[\"Read(/$R/**)\",\"Edit(/$R/workers/w01/**)\"]"
 brig kill w01 >/dev/null
 brig spawn c01 "$E_DIR/task.md" --agent codex >/dev/null 2>&1
 expect_has "a codex worker starts under Git Bash by its full path" "$(cat "$R/workers/c01/launch.sh")" "exec \"$gb\" $SKILL/scripts/codex-worker"
@@ -474,9 +479,40 @@ for b in wmux wmux-ow; do
   expect_has "$b quotes curly apostrophes for PowerShell too" "$(bash -c 'source "$1"; ps_quote "$2"' _ "$SKILL/scripts/backends/$b.sh" "C:/Users/O’Neil's ‘x’")" "'C:/Users/O’’Neil''s ‘‘x’’'"
 done
 unset CLAUDE_CODE_GIT_BASH_PATH
-out="$(env -u BRIG_HOME CLAUDE_CONFIG_DIR='C:\fake\cfg' bash "$SKILL/scripts/brig" config 2>&1)"
+mkdir -p "$T_ROOT/cfg/brigadier"
+out="$(env -u BRIG_HOME HOME="$E_DIR/winhome" CLAUDE_CONFIG_DIR='C:\fake\cfg' bash "$SKILL/scripts/brig" config 2>&1)"
 expect_has "a Windows-style CLAUDE_CONFIG_DIR is read as a bash path" "$out" "user config: $T_ROOT/cfg/brigadier/config.env"
 unset BRIG_RUN FAKE_WIN_ROOT; export PATH="${PATH#"$TESTS_DIR/fakes/win:"}"
+
+echo "== state dir: ~/.brigadier, or the old one inside Claude Code's config dir"
+new_env cmux
+H="$E_DIR/h"; mkdir -p "$H"
+hb() { env -u BRIG_HOME HOME="$H" CLAUDE_CONFIG_DIR="$H/cfg" bash "$SKILL/scripts/brig" "$@"; }
+expect_has "a new machine uses ~/.brigadier" "$(hb config)" "user config: $H/.brigadier/config.env"
+expect_not "and doctor has nothing to say about it" "$(hb doctor 2>&1)" "move it"
+rm -rf "$H/.brigadier"
+OLD="$H/cfg/brigadier"; mkdir -p "$OLD/fake-modes"; echo "BRIG_CTX_PCT=44" >"$OLD/config.env"
+expect_has "an existing old state dir stays in use" "$(hb config)" "user config: $OLD/config.env"
+expect_has "with its config" "$(hb config)" "BRIG_CTX_PCT           44                       user"
+oid="$(run_id_of "$(CMUX_SURFACE_ID=movetest hb init moved)")"
+check "a run starts there" test -f "$OLD/runs/$oid/run.env"
+expect_has "the binding names the old path" "$(cat "$OLD/bindings/cmux-movetest")" "$OLD/runs/$oid"
+out="$(hb doctor 2>&1)"
+expect_has "doctor says how to move it" "$out" "note  run state is still in $OLD, inside Claude Code's config dir"
+expect_has "with the command" "$out" "mv $OLD $H/.brigadier"
+# shellcheck disable=SC2016 # expanded by the inner bash
+expect_has "without CLAUDE_CONFIG_DIR the old dir is ~/.claude/brigadier" "$(env -u BRIG_HOME -u CLAUDE_CONFIG_DIR HOME="$E_DIR/h2" bash -c 'mkdir -p "$HOME/.claude/brigadier"; bash "$1" config' _ "$SKILL/scripts/brig")" "user config: $E_DIR/h2/.claude/brigadier/config.env"
+mv "$OLD" "$H/.brigadier"
+expect_has "after the move, ~/.brigadier is used" "$(hb config)" "user config: $H/.brigadier/config.env"
+expect_has "with the same config" "$(hb config)" "BRIG_CTX_PCT           44                       user"
+expect_has "the old binding finds the moved run" "$(CMUX_SURFACE_ID=movetest hb run)" "$H/.brigadier/runs/$oid"
+expect_has "so does a BRIG_RUN with the old path" "$(BRIG_RUN="$OLD/runs/$oid" hb status 2>&1)" "WID"
+expect_has "resume works" "$(hb use "$oid")" "$H/.brigadier/runs/$oid"
+out="$(CMUX_SURFACE_ID=movetest hb spawn w01 "$E_DIR/task.md" 2>&1)"
+expect_has "and the moved run spawns workers in its new place" "$out" "dir=$H/.brigadier/runs/$oid/workers/w01"
+CMUX_SURFACE_ID=movetest hb kill w01 >/dev/null
+expect_not "doctor has no more note" "$(hb doctor 2>&1)" "run state is still in"
+expect_has "a BRIG_HOME inside Claude Code's config dir gets a note" "$(BRIG_HOME="$H/cfg/elsewhere" CLAUDE_CONFIG_DIR="$H/cfg" bash "$SKILL/scripts/brig" doctor 2>&1)" "note  BRIG_HOME=$H/cfg/elsewhere is inside Claude Code's config dir"
 
 echo "== doctor"
 new_env cmux
@@ -678,12 +714,13 @@ RID="$(run_id_of "$(brig init perms)")"; export BRIG_RUN="$RID"; R="$BRIG_HOME/r
 fake_mode successor ack
 BRIG_REBIRTH_TIMEOUT=20 brig rebirth >/dev/null 2>&1
 expect_has "by default it bypasses permissions, like workers" "$(cat "$R/rebirth.sh")" "--permission-mode bypassPermissions"
-expect_has "without the bypass warning" "$(jq -c . "$R/rebirth-settings.json")" '{"skipDangerousModePermissionPrompt":true}'
+expect_has "without the bypass warning" "$(jq -c .skipDangerousModePermissionPrompt "$R/rebirth-settings.json")" 'true'
+expect_has "it reads and edits its run dir without a prompt" "$(jq -c .permissions "$R/rebirth-settings.json")" "{\"additionalDirectories\":[\"$R\"],\"allow\":[\"Read(/$R/**)\",\"Edit(/$R/**)\"]}"
 brig kill successor >/dev/null 2>&1
 printf 'BRIG_PERMISSION_MODE=manual\n' >"$BRIG_HOME/config.env"
 BRIG_REBIRTH_TIMEOUT=20 brig rebirth >/dev/null 2>&1
 expect_has "it follows BRIG_PERMISSION_MODE" "$(cat "$R/rebirth.sh")" "--permission-mode manual"
-expect_has "with no bypass setting" "$(jq -c . "$R/rebirth-settings.json")" '{"skipDangerousModePermissionPrompt":false}'
+expect_has "with no bypass setting" "$(jq -c .skipDangerousModePermissionPrompt "$R/rebirth-settings.json")" 'false'
 expect_has "doctor names the brigadier too" "$(brig doctor 2>&1)" "workers and the reborn brigadier: Claude manual"
 brig kill successor >/dev/null 2>&1; unset BRIG_RUN
 
