@@ -1,7 +1,7 @@
 # shellcheck shell=bash
 # Terminal backend: wmux-ow, for openwong2kim/wmux (https://github.com/openwong2kim/wmux), the
 # fallback Windows backend (amirlehmam/wmux, backend wmux, is the recommended one).
-# Written against openwong2kim/wmux 4.5.0. Sourced by brig. Contract: see CONTRIBUTING.md.
+# Tested on a real PC with openwong2kim/wmux 4.3.0 (newer releases read from source up to 4.5.0). Sourced by brig. Contract: see CONTRIBUTING.md.
 # Run-level variables available here (from run.env): WORKSPACE, WMUX_BASH, OW_PIPE.
 #
 # Its CLI (wmux.cmd) can't open a tab in a given cwd or workspace, and cmd mangles message text,
@@ -46,15 +46,17 @@ ow_token() {
 }
 
 # ow_rpc <method> <params-json>: prints the result as JSON, or fails with wmux's error on stderr.
+# wmux's errors often start with the method name already ("input.send: pane …"); it's printed once.
 ow_rpc() {
-  local id req out
+  local id req out e
   id="brig-$(od -An -tx1 -N8 /dev/urandom | tr -d ' \n')"
   req="$(jq -cn --arg id "$id" --arg m "$1" --argjson p "$2" --arg t "$(ow_token)" \
     '{id: $id, method: $m, params: $p, token: $t, clientName: "wmux-cli"}')" || return 1
   out="$(MSYS2_ARG_CONV_EXCL='*' MSYS_NO_PATHCONV=1 WMUXOW_PIPE="${OW_PIPE:-$(ow_pipe)}" WMUXOW_REQ="$req" WMUXOW_ID="$id" \
     powershell.exe -NoProfile -NonInteractive -Command "$OW_PS" | tr -d '\r')" || return 1
   if [[ "$(jq -r '.ok' <<<"$out" 2>/dev/null)" != true ]]; then
-    echo "wmux: $1: $(jq -r '.error // "no answer"' <<<"$out" 2>/dev/null || echo "$out")" >&2
+    e="$(jq -r '.error // "no answer"' <<<"$out" 2>/dev/null || echo "$out")"
+    echo "wmux: $1: ${e#"$1: "}" >&2
     return 1
   fi
   jq -c '.result' <<<"$out"
@@ -135,8 +137,9 @@ be_send_enter() {
     '{ptyId: $p, workspaceId: $w, key: "enter"}')" >/dev/null
 }
 # input.sendKey knows enter, tab, escape and the arrows (KEY_MAP in src/main/pipe/handlers/input.rpc.ts);
-# space and digits are typed. wmux refuses both while a numbered approval prompt ("❯ 1. Yes") is on
-# screen, unless the workspace lets automated callers answer approvals; its error says so.
+# space and digits are typed. While a pane shows the agent's own permission dialog, wmux (4.3.0) refuses
+# input.send and every input.sendKey except escape, which denies the dialog: brig can deny a prompt but
+# never approve one; only the user can, in the pane. Its error says so.
 be_send_key() {
   case "$2" in
     [1-9]) be_send_text "$1" "$2" ;;

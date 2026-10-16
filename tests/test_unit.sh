@@ -210,8 +210,13 @@ expect_has "keys go through input.sendKey" "$(cat "$FAKE_TERM_DIR/log")" "wmux-o
 brig send w01 'show a permission dialog' >/dev/null; sleep 1
 out="$(brig key w01 1 2>&1)"; code=$?
 check "a key at a numbered approval prompt fails" test "$code" -ne 0
-expect_has "with wmux's own reason" "$out" "is showing an approval prompt"
+expect_has "with wmux's own reason, the method named once" "$out" "wmux: input.send: pane \"${sid#*@}\" is showing the agent's own permission dialog"
+expect_not "not twice" "$out" "input.send: input.send:"
 expect_has "and how many keys got through" "$out" "0 of 1 keys were pressed"
+out="$(brig key w01 enter 2>&1)"
+expect_has "a named key is refused the same way" "$out" "wmux: input.sendKey: pane"
+out="$(brig key w01 escape 2>&1)"; code=$?
+check "escape still gets through: the brigadier can deny" test "$code" -eq 0
 brig kill w01 >/dev/null
 check "kill closes the surface" grep -q "wmux-ow surface.close {\"id\":\"${sid%@*}\"}" "$FAKE_TERM_DIR/log"
 fake_mode successor ack
@@ -251,8 +256,11 @@ new_env wmux-ow
 out="$(brig doctor 2>&1)"; code=$?
 expect_has "doctor names openwong2kim/wmux and its version" "$out" "ok    terminal: wmux-ow (openwong2kim/wmux 4.5.0-fake, pane opty-self-"
 expect_has "and what the fallback can't do" "$out" "tabs keep wmux's own titles"
-expect_has "and what it was tested with" "$out" "tested on a real PC with 4.3.0, source read at 4.5.0"
+expect_has "and what it was tested with" "$out" "tested on a real PC with 4.3.0 (newer releases read from source up to 4.5.0)"
 check "and passes" test "$code" -eq 0
+expect_not "bypassPermissions needs no note about approvals" "$out" "can deny a prompt but not approve one"
+out="$(BRIG_PERMISSION_MODE=acceptEdits brig doctor 2>&1)"
+expect_has "a stricter mode gets a note: approvals wait for the user" "$out" "note  openwong2kim/wmux lets automation press only Escape at a worker's permission dialog: with BRIG_PERMISSION_MODE=acceptEdits the brigadier can deny a prompt but not approve one"
 export LOCALAPPDATA="$E_DIR/localappdata"; mkdir -p "$LOCALAPPDATA/wmux/app-4.2.9" "$LOCALAPPDATA/wmux/app-4.10.0" "$LOCALAPPDATA/wmux/app-4.3.0"
 mv "$USERPROFILE/.wmux-auth-token" "$E_DIR/token.away"
 expect_has "with no answer from the pipe, the version comes from the install folder" "$(brig doctor 2>&1)" "openwong2kim/wmux 4.10.0 (from its install folder; its pipe did not answer)"

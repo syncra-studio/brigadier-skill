@@ -20,11 +20,12 @@ tok="$(cat "${USERPROFILE:-/nonexistent}/.wmux-auth-token" 2>/dev/null)"
 [[ -n "$tok" && "$(jq -r .token <<<"$req")" == "$tok" ]] \
   || { err "Unauthorized"; exit 0; }
 WS="ws-test"
-# wmux's approval gate (assertNotTypingAtAnApproval): with autonomy off, the default, raw input is
-# refused while a numbered option sits under a cursor on the pane's screen.
+# wmux's approval gate, as 4.3.0 behaves on a real PC: while a numbered option sits under a cursor on
+# the pane's screen (the agent's own permission dialog), input.send and every key but escape are refused,
+# with an error that starts with the method name.
 gated() {
   ft_read "$1" 60 2>/dev/null | grep -Eq '^[[:space:]│]*[❯>›»][[:space:]]*[0-9]{1,2}[.)][[:space:]]+[^[:space:]]' || return 1
-  err "$2: pane \"$1\" is showing an approval prompt, and this workspace's policy (autonomy-off) does not let an automated caller answer it — refusing raw input."
+  err "$2: pane \"$1\" is showing the agent's own permission dialog for tool \"Bash\" — refusing to type at it. A human answers this in the pane."
 }
 mkdir -p "$FAKE_TERM_DIR/ow"
 case "$m" in
@@ -56,7 +57,7 @@ case "$m" in
     case "$k" in enter|tab|escape|up|down|left|right|ctrl+c|ctrl+d|ctrl+z|ctrl+l) ;;
       *) err "input.sendKey: unknown key \"$k\". Supported: enter, tab, ctrl+c, ctrl+d, ctrl+z, ctrl+l, escape, up, down, right, left"; exit 0 ;;
     esac
-    gated "$(P ptyId)" input.sendKey && exit 0
+    if [[ "$k" != escape ]] && gated "$(P ptyId)" input.sendKey; then exit 0; fi
     if [[ "$k" == enter ]]; then f=ft_enter; else f=ft_key; fi
     if "$f" "$(P ptyId)" "$k"; then ok '{"ok":true}'; else err "input.sendKey: no such pty"; fi ;;
   input.readScreen)

@@ -305,7 +305,7 @@ wmux_flavor() {
 WMUX_RELEASES="https://github.com/amirlehmam/wmux/releases/latest"
 WMUX_TESTED="2.24.0"
 WMUX_OW_TESTED="4.3.0"   # on a real Windows PC
-WMUX_OW_READ="4.5.0"     # the source the backend was written against
+WMUX_OW_READ="4.5.0"     # newer releases, read from source only
 WMUX_OW_WINGET="winget install --id openwong2kim.wmux -e --source winget"
 no_terminal_msg() {
   if ! is_windows; then
@@ -342,7 +342,7 @@ wmux_doctor_line() {
       if [[ -z "$v" ]]; then
         v="$(wmux_ow_installed)"; v="${v:+$v (from its install folder; its pipe did not answer)}"
       fi
-      echo "terminal: wmux-ow (openwong2kim/wmux ${v:-version unknown: its pipe did not answer}, pane $WMUX_PTY_ID; tested on a real PC with $WMUX_OW_TESTED, source read at $WMUX_OW_READ). The fallback: tabs keep wmux's own titles, the sidebar status may not clear, and only tabs in this workspace are tracked" ;;
+      echo "terminal: wmux-ow (openwong2kim/wmux ${v:-version unknown: its pipe did not answer}, pane $WMUX_PTY_ID; tested on a real PC with $WMUX_OW_TESTED (newer releases read from source up to $WMUX_OW_READ)). The fallback: tabs keep wmux's own titles, the sidebar status may not clear, and only tabs in this workspace are tracked" ;;
   esac
 }
 
@@ -1286,6 +1286,9 @@ cmd_doctor() {
   if model_allowed "$BRIG_DEFAULT_MODEL"; then ok "models: default $BRIG_DEFAULT_MODEL, chores $BRIG_CHORE_MODEL, allowed: $BRIG_ALLOWED_MODELS"
   else no "BRIG_DEFAULT_MODEL=$BRIG_DEFAULT_MODEL is not in BRIG_ALLOWED_MODELS ($BRIG_ALLOWED_MODELS)"; fi
   if v="$( (check_permission_mode) 2>&1)"; then ok "$(posture)"; else no "${v#brig: }"; fi
+  if [[ "${b:-}" == wmux-ow && "$BRIG_PERMISSION_MODE" != bypassPermissions ]]; then
+    warn "openwong2kim/wmux lets automation press only Escape at a worker's permission dialog: with BRIG_PERMISSION_MODE=$BRIG_PERMISSION_MODE the brigadier can deny a prompt but not approve one, so every approval waits for you in the worker's tab. For unattended nights use bypassPermissions"
+  fi
   if (( bad == 0 )); then echo "all good"; else echo "fix the FAIL lines first (/brigadier setup prints the exact commands)"; return 1; fi
 }
 
